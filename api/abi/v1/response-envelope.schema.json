@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yourikka/minicloud/api/abi/v1/response-envelope.schema.json",
+  "title": "MiniCloud wasi-command-v1 ResponseEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec_version", "status", "headers", "body_base64"],
+  "properties": {
+    "spec_version": {"const": "1.0"},
+    "status": {"type": "integer", "minimum": 200, "maximum": 599},
+    "headers": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {"pattern": "^[!#$%&'*+.^_`|~0-9a-z-]+$"},
+      "additionalProperties": {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 8192}
+      }
+    },
+    "body_base64": {"type": "string", "contentEncoding": "base64"}
+  }
+}
