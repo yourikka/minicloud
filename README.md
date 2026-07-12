@@ -6,8 +6,9 @@ normative product and acceptance requirements are defined in
 
 The implementation is being delivered in the specification's M0 to M3 order.
 The repository currently contains the protocol and deterministic-domain
-foundation, the `wasi-command-v1` schemas and Go SDK, and the Local Profile
-artifact CAS. It does not yet claim a runnable `v0.1-core` cluster.
+foundation, the `wasi-command-v1` schemas and Go SDK, the Local Profile
+artifact CAS, and a one-shot wazero admission validator with a parent-process
+watchdog. It does not yet claim a runnable `v0.1-core` cluster.
 
 ## Development
 
