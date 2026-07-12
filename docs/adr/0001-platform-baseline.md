@@ -12,7 +12,9 @@ locked before runtime and persistence work begins.
 
 ## Decision
 
-- Use one Go module, `github.com/yourikka/minicloud`, targeting Go 1.26.
+- Use one Go module, `github.com/yourikka/minicloud`, requiring Go 1.26.5 or
+  newer. This is the first Go 1.26 patch that fixes the `os.Root` issue tracked
+  as GO-2026-4970.
 - Keep executable wiring in `cmd/` and implementation packages in `internal/`.
 - Use manual constructor injection. Interfaces are declared by consuming
   packages and implemented by adapters.

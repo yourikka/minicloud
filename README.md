@@ -6,11 +6,13 @@ normative product and acceptance requirements are defined in
 
 The implementation is being delivered in the specification's M0 to M3 order.
 The repository currently contains the protocol and deterministic-domain
-foundation; it does not yet claim a runnable `v0.1-core` cluster.
+foundation plus the Local Profile artifact CAS. It does not yet claim a
+runnable `v0.1-core` cluster.
 
 ## Development
 
-Go 1.26 or newer is required.
+Go 1.26.5 or newer is required. Earlier Go 1.26 patch releases contain a
+standard-library `os.Root` vulnerability reachable by the local artifact CAS.
 
 ```sh
 make test
