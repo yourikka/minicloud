@@ -1,5 +1,25 @@
-.DS_Store
+# Build outputs
+/bin/
+*.exe
+*.test
+
+# Test and profiling outputs
+*.out
+coverage.html
+coverage.out
+
+# Dependency and tool caches
+/vendor/
+/tmp/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
 .idea/
 .vscode/
 *.swp
-*~
+*.swo
+.DS_Store
