@@ -49,12 +49,13 @@ type Info struct {
 
 // Store persists immutable blobs below one filesystem root.
 type Store struct {
-	root     *os.Root
-	maxBytes int64
-	random   io.Reader
-	randomMu sync.Mutex
-	mu       sync.RWMutex
-	closed   bool
+	root        *os.Root
+	maxBytes    int64
+	random      io.Reader
+	randomMu    sync.Mutex
+	digestLocks [256]sync.Mutex
+	mu          sync.RWMutex
+	closed      bool
 }
 
 // Open creates or opens a local artifact store.
@@ -168,23 +169,33 @@ func (s *Store) Put(
 	}
 	temporaryOpen = false
 
+	digestLock := s.digestLock(expected)
+	digestLock.Lock()
+	defer digestLock.Unlock()
+
 	blobName := blobPath(expected)
 	if err := s.root.MkdirAll(path.Dir(blobName), 0o700); err != nil {
 		return Info{}, fmt.Errorf("creating artifact shard: %w", err)
 	}
-	if err := s.root.Link(temporaryName, blobName); err != nil {
-		if !errors.Is(err, fs.ErrExist) {
-			return Info{}, fmt.Errorf("publishing artifact: %w", err)
+	var recoveryErr error
+	publishErr := s.root.Link(temporaryName, blobName)
+	if errors.Is(publishErr, fs.ErrExist) {
+		existingInfo, verifyErr := s.verifyLocked(ctx, expected)
+		if verifyErr == nil {
+			return Info{
+				Digest:  existingInfo.Digest,
+				Size:    existingInfo.Size,
+				Created: false,
+			}, nil
 		}
-		existingInfo, verifyErr := s.verify(ctx, expected)
-		if verifyErr != nil {
+		if !errors.Is(verifyErr, ErrCorrupt) {
 			return Info{}, verifyErr
 		}
-		return Info{
-			Digest:  existingInfo.Digest,
-			Size:    existingInfo.Size,
-			Created: false,
-		}, nil
+		recoveryErr = verifyErr
+		publishErr = s.root.Link(temporaryName, blobName)
+	}
+	if publishErr != nil {
+		return Info{}, errors.Join(recoveryErr, fmt.Errorf("publishing artifact: %w", publishErr))
 	}
 
 	if err := syncDirectory(s.root, path.Dir(blobName)); err != nil {
@@ -211,6 +222,9 @@ func (s *Store) OpenVerified(
 		return nil, Info{}, err
 	}
 	defer s.end()
+	digestLock := s.digestLock(expected)
+	digestLock.Lock()
+	defer digestLock.Unlock()
 
 	file, err := s.root.Open(blobPath(expected))
 	if err != nil {
@@ -218,7 +232,11 @@ func (s *Store) OpenVerified(
 	}
 	info, err := verifyFile(ctx, file, expected, s.maxBytes)
 	if err != nil {
-		return nil, Info{}, errors.Join(err, file.Close())
+		closeErr := file.Close()
+		if errors.Is(err, ErrCorrupt) {
+			return nil, Info{}, errors.Join(err, closeErr, s.removeCorrupt(expected))
+		}
+		return nil, Info{}, errors.Join(err, closeErr)
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, Info{}, errors.Join(fmt.Errorf("rewinding artifact: %w", err), file.Close())
@@ -226,7 +244,8 @@ func (s *Store) OpenVerified(
 	return file, info, nil
 }
 
-func (s *Store) verify(ctx context.Context, expected digest.SHA256) (Info, error) {
+// verifyLocked verifies an existing path while the digest lock is held.
+func (s *Store) verifyLocked(ctx context.Context, expected digest.SHA256) (Info, error) {
 	file, err := s.root.Open(blobPath(expected))
 	if err != nil {
 		return Info{}, fmt.Errorf("opening existing artifact: %w", err)
@@ -234,12 +253,40 @@ func (s *Store) verify(ctx context.Context, expected digest.SHA256) (Info, error
 	info, verifyErr := verifyFile(ctx, file, expected, s.maxBytes)
 	closeErr := file.Close()
 	if verifyErr != nil {
+		if errors.Is(verifyErr, ErrCorrupt) {
+			return Info{}, errors.Join(verifyErr, closeErr, s.removeCorrupt(expected))
+		}
 		return Info{}, errors.Join(verifyErr, closeErr)
 	}
 	if closeErr != nil {
 		return Info{}, fmt.Errorf("closing existing artifact: %w", closeErr)
 	}
 	return info, nil
+}
+
+// removeCorrupt removes the current blob while the digest lock is held.
+func (s *Store) removeCorrupt(expected digest.SHA256) error {
+	name := blobPath(expected)
+	if err := s.root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing corrupt artifact: %w", err)
+	}
+	if err := syncDirectory(s.root, path.Dir(name)); err != nil {
+		return fmt.Errorf("syncing artifact removal: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) digestLock(value digest.SHA256) *sync.Mutex {
+	hexDigest := strings.TrimPrefix(value.String(), "sha256:")
+	index := hexNibble(hexDigest[0])<<4 | hexNibble(hexDigest[1])
+	return &s.digestLocks[index]
+}
+
+func hexNibble(value byte) int {
+	if value <= '9' {
+		return int(value - '0')
+	}
+	return int(value-'a') + 10
 }
 
 func verifyFile(

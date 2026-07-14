@@ -10,7 +10,9 @@ foundation, the `wasi-command-v1` schemas and Go SDK, the Local Profile
 artifact CAS, and a one-shot wazero admission validator with a parent-process
 watchdog. A Worker-side WASI Command execution core now provides fresh guest
 instances, strict ABI I/O, deadlines, bounded logs/output, and default-deny host
-resources. It does not yet claim a runnable `v0.1-core` cluster.
+resources. Its verified loader coalesces cold loads and owns a bounded,
+lease-pinned compiled LRU cache. It does not yet claim a runnable `v0.1-core`
+cluster.
 
 ## Development
 

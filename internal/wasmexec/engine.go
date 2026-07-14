@@ -70,6 +70,7 @@ type Result struct {
 type Engine struct {
 	runtime            wazero.Runtime
 	wasi               wazero.CompiledModule
+	profile            wasmprofile.Profile
 	defaultTimeout     time.Duration
 	maxTimeout         time.Duration
 	abiLimits          abi.Limits
@@ -127,6 +128,7 @@ func New(ctx context.Context, config Config) (*Engine, error) {
 	return &Engine{
 		runtime:            runtimeInstance,
 		wasi:               wasiCompiled,
+		profile:            wasmprofile.Profile{Engine: config.Engine, MemoryLimitMiB: config.MemoryLimitMiB},
 		defaultTimeout:     config.DefaultTimeout,
 		maxTimeout:         config.MaxTimeout,
 		abiLimits:          config.ABILimits,
@@ -139,6 +141,11 @@ func New(ctx context.Context, config Config) (*Engine, error) {
 		limiter:            newLimiter(config.MaxConcurrent, config.MaxQueue),
 		lifecycle:          newLifecycle(),
 	}, nil
+}
+
+// Profile returns the immutable compilation profile owned by this Engine.
+func (e *Engine) Profile() wasmprofile.Profile {
+	return e.profile
 }
 
 // Compile compiles and rechecks one admitted module for repeated fresh-instance

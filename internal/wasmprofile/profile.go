@@ -21,21 +21,36 @@ const (
 
 var memoryTiersMiB = []uint32{64, 128, 256, 512}
 
-// RuntimeConfig returns the locked v1 runtime configuration.
-func RuntimeConfig(engine string, memoryLimitMiB uint32) (wazero.RuntimeConfig, error) {
+// Profile identifies the immutable runtime choices that affect compilation.
+type Profile struct {
+	Engine         string
+	MemoryLimitMiB uint32
+}
+
+// New validates and returns a locked runtime profile.
+func New(engine string, memoryLimitMiB uint32) (Profile, error) {
 	if engine != EngineCompiler && engine != EngineInterpreter {
-		return nil, errors.New("unsupported wasm runtime engine")
+		return Profile{}, errors.New("unsupported wasm runtime engine")
 	}
 	if !ValidMemoryTier(memoryLimitMiB) {
-		return nil, errors.New("unsupported wasm memory tier")
+		return Profile{}, errors.New("unsupported wasm memory tier")
+	}
+	return Profile{Engine: engine, MemoryLimitMiB: memoryLimitMiB}, nil
+}
+
+// RuntimeConfig returns the locked v1 runtime configuration.
+func RuntimeConfig(engine string, memoryLimitMiB uint32) (wazero.RuntimeConfig, error) {
+	profile, err := New(engine, memoryLimitMiB)
+	if err != nil {
+		return nil, err
 	}
 	config := wazero.NewRuntimeConfigCompiler()
-	if engine == EngineInterpreter {
+	if profile.Engine == EngineInterpreter {
 		config = wazero.NewRuntimeConfigInterpreter()
 	}
 	return config.
 		WithCoreFeatures(api.CoreFeaturesV2).
-		WithMemoryLimitPages(MemoryLimitPages(memoryLimitMiB)).
+		WithMemoryLimitPages(MemoryLimitPages(profile.MemoryLimitMiB)).
 		WithCloseOnContextDone(true).
 		WithCustomSections(false).
 		WithDebugInfoEnabled(false), nil

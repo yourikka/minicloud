@@ -18,3 +18,14 @@ func TestRuntimeConfigAcceptsOnlyLockedEnginesAndMemoryTiers(t *testing.T) {
 		t.Fatal("RuntimeConfig() accepted an unknown memory tier")
 	}
 }
+
+func TestNewReturnsImmutableProfileIdentity(t *testing.T) {
+	t.Parallel()
+	profile, err := New(EngineCompiler, 128)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if profile.Engine != EngineCompiler || profile.MemoryLimitMiB != 128 {
+		t.Fatalf("Profile = %+v", profile)
+	}
+}

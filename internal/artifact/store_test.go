@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -206,6 +207,124 @@ func TestStoreOpenVerifiedDetectsCorruption(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("OpenVerified() error = %v, want errors.Is(ErrCorrupt)", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("stat corrupt blob error = %v, want errors.Is(fs.ErrNotExist)", statErr)
+	}
+
+	restored, err := store.Put(context.Background(), wantDigest, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Put() after corrupt removal error = %v", err)
+	}
+	if !restored.Created {
+		t.Error("Put() after corrupt removal did not create a replacement blob")
+	}
+}
+
+func TestStorePutReplacesCorruptExistingBlob(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openTestStore(t, 1<<20)
+	payload := []byte("artifact restored by put")
+	wantDigest := digest.Sum(payload)
+	if _, err := store.Put(context.Background(), wantDigest, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("initial Put() error = %v", err)
+	}
+	file, _, err := store.OpenVerified(context.Background(), wantDigest)
+	if err != nil {
+		t.Fatalf("OpenVerified() error = %v", err)
+	}
+	artifactPath := file.Name()
+	if err := file.Close(); err != nil {
+		t.Fatalf("closing artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("corrupt existing artifact"), 0o600); err != nil {
+		t.Fatalf("tampering with artifact: %v", err)
+	}
+
+	restored, err := store.Put(context.Background(), wantDigest, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("restoring Put() error = %v", err)
+	}
+	if !restored.Created {
+		t.Error("restoring Put() created = false, want true")
+	}
+	file, _, err = store.OpenVerified(context.Background(), wantDigest)
+	if err != nil {
+		t.Fatalf("OpenVerified() after restore error = %v", err)
+	}
+	got, readErr := io.ReadAll(file)
+	if err := errors.Join(readErr, file.Close()); err != nil {
+		t.Fatalf("reading restored artifact: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("restored artifact = %q, want %q", got, payload)
+	}
+}
+
+func TestStoreConcurrentCorruptReadsAndRestorePreserveReplacement(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openTestStore(t, 4<<20)
+	payload := bytes.Repeat([]byte("valid-artifact-block"), 64<<10)
+	wantDigest := digest.Sum(payload)
+	if _, err := store.Put(context.Background(), wantDigest, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("initial Put() error = %v", err)
+	}
+	file, _, err := store.OpenVerified(context.Background(), wantDigest)
+	if err != nil {
+		t.Fatalf("OpenVerified() error = %v", err)
+	}
+	artifactPath := file.Name()
+	if err := file.Close(); err != nil {
+		t.Fatalf("closing artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, bytes.Repeat([]byte{0xff}, len(payload)), 0o600); err != nil {
+		t.Fatalf("tampering with artifact: %v", err)
+	}
+
+	const readers = 16
+	start := make(chan struct{})
+	readerErrors := make(chan error, readers)
+	var wait sync.WaitGroup
+	for range readers {
+		wait.Go(func() {
+			<-start
+			opened, _, openErr := store.OpenVerified(context.Background(), wantDigest)
+			if opened != nil {
+				openErr = errors.Join(openErr, opened.Close())
+			}
+			readerErrors <- openErr
+		})
+	}
+	restoreResult := make(chan error, 1)
+	wait.Go(func() {
+		<-start
+		_, restoreErr := store.Put(context.Background(), wantDigest, bytes.NewReader(payload))
+		restoreResult <- restoreErr
+	})
+	close(start)
+	wait.Wait()
+	close(readerErrors)
+
+	if err := <-restoreResult; err != nil {
+		t.Fatalf("concurrent restoring Put() error = %v", err)
+	}
+	for openErr := range readerErrors {
+		if openErr != nil && !errors.Is(openErr, ErrCorrupt) && !errors.Is(openErr, fs.ErrNotExist) {
+			t.Errorf("concurrent OpenVerified() error = %v", openErr)
+		}
+	}
+	file, _, err = store.OpenVerified(context.Background(), wantDigest)
+	if err != nil {
+		t.Fatalf("final OpenVerified() error = %v", err)
+	}
+	got, readErr := io.ReadAll(file)
+	if err := errors.Join(readErr, file.Close()); err != nil {
+		t.Fatalf("reading final artifact: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("concurrent corrupt readers removed or changed the replacement blob")
 	}
 }
 
