@@ -11,8 +11,9 @@ artifact CAS, and a one-shot wazero admission validator with a parent-process
 watchdog. A Worker-side WASI Command execution core now provides fresh guest
 instances, strict ABI I/O, deadlines, bounded logs/output, and default-deny host
 resources. Its verified loader coalesces cold loads and owns a bounded,
-lease-pinned compiled LRU cache. It does not yet claim a runnable `v0.1-core`
-cluster.
+lease-pinned compiled LRU cache. A boot-local Serving Authorization gate fences
+old Worker sessions and Leader epochs before synchronous work starts. It does
+not yet claim a runnable `v0.1-core` cluster.
 
 ## Development
 
