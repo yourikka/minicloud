@@ -160,7 +160,11 @@ func TestEnvelopeLimits(t *testing.T) {
 
 	t.Run("invalid raised limit", func(t *testing.T) {
 		t.Parallel()
-		if err := abi.EncodeRequest(io.Discard, validRequest(), abi.Limits{JSONDepth: 33}); err == nil {
+		limits := abi.Limits{JSONDepth: 33}
+		if err := limits.Validate(); err == nil {
+			t.Fatal("Limits.Validate() accepted a limit above the v1 maximum")
+		}
+		if err := abi.EncodeRequest(io.Discard, validRequest(), limits); err == nil {
 			t.Fatal("EncodeRequest() accepted a limit above the v1 maximum")
 		}
 	})

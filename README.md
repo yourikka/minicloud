@@ -8,7 +8,9 @@ The implementation is being delivered in the specification's M0 to M3 order.
 The repository currently contains the protocol and deterministic-domain
 foundation, the `wasi-command-v1` schemas and Go SDK, the Local Profile
 artifact CAS, and a one-shot wazero admission validator with a parent-process
-watchdog. It does not yet claim a runnable `v0.1-core` cluster.
+watchdog. A Worker-side WASI Command execution core now provides fresh guest
+instances, strict ABI I/O, deadlines, bounded logs/output, and default-deny host
+resources. It does not yet claim a runnable `v0.1-core` cluster.
 
 ## Development
 
@@ -17,7 +19,9 @@ standard-library `os.Root` vulnerability reachable by the local artifact CAS.
 
 ```sh
 make test
+make test-integration
 make test-race
+make test-race-integration
 make build
 ```
 

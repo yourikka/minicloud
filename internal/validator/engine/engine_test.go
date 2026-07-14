@@ -8,6 +8,7 @@ import (
 	"github.com/yourikka/minicloud/internal/model"
 	"github.com/yourikka/minicloud/internal/problem"
 	"github.com/yourikka/minicloud/internal/validator/protocol"
+	"github.com/yourikka/minicloud/internal/wasmprofile"
 )
 
 func TestValidateFeatureProfile(t *testing.T) {
@@ -32,6 +33,7 @@ func TestValidateFeatureProfile(t *testing.T) {
 		{name: "shared memory", wasm: commandModule(sharedMemory(), nil), reason: "compile_failed"},
 		{name: "memory64", wasm: commandModule(memory64(), nil), reason: "compile_failed"},
 		{name: "threads opcode", wasm: atomicFenceModule(), reason: "compile_failed"},
+		{name: "binary start section", wasm: startSectionModule(), reason: "unsupported_start_section"},
 		{name: "component model", wasm: []byte{0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00}, reason: "compile_failed"},
 		{name: "memory tier exceeded", wasm: commandModule(memoryWithMinimum(1025), nil), reason: "compile_failed", memoryMiB: 64},
 		{
@@ -79,12 +81,12 @@ func TestCountDeclaredImportsAfterCustomSection(t *testing.T) {
 	withCustom := append(wasmHeader(), section(0, name("fixture"))...)
 	withCustom = append(withCustom, module[len(wasmHeader()):]...)
 
-	count, err := countDeclaredImports(withCustom)
+	metadata, err := wasmprofile.InspectBinary(withCustom)
 	if err != nil {
-		t.Fatalf("countDeclaredImports() error = %v", err)
+		t.Fatalf("InspectBinary() error = %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("countDeclaredImports() = %d, want 1", count)
+	if metadata.DeclaredImports != 1 {
+		t.Fatalf("DeclaredImports = %d, want 1", metadata.DeclaredImports)
 	}
 }
 
@@ -259,6 +261,19 @@ func atomicFenceModule() []byte {
 	export = append(export, u32(0)...)
 	module = append(module, section(7, vector(export))...)
 	body := []byte{0x00, 0xfe, 0x03, 0x00, 0x0b}
+	module = append(module, section(10, vector(sized(body)))...)
+	return module
+}
+
+func startSectionModule() []byte {
+	module := wasmHeader()
+	module = append(module, section(1, vector(functionType(nil, nil)))...)
+	module = append(module, section(3, vector(u32(0)))...)
+	export := append(name("_start"), 0x00)
+	export = append(export, u32(0)...)
+	module = append(module, section(7, vector(export))...)
+	module = append(module, section(8, u32(0))...)
+	body := []byte{0x00, 0x0b}
 	module = append(module, section(10, vector(sized(body)))...)
 	return module
 }

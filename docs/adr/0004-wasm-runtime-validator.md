@@ -24,7 +24,8 @@ feature set, and memory tiers must be explicit and cache-key inputs.
 - Use the wazero WASI Preview 1 `wasi_snapshot_preview1` module as the frozen
   function-import catalog. Admission accepts only matching function names and
   signatures from that module, rejects imported memory, and requires a
-  module-defined `_start` function with signature `() -> ()`.
+  module-defined `_start` function with signature `() -> ()`. A binary Start
+  Section is rejected so no guest code can run before the command entrypoint.
 - Keep compiler and interpreter as distinct profile values. Production uses
   the compiler; the interpreter remains a compatibility test path. Runtime
   config disables custom-section retention and debug info, closes work on
@@ -71,6 +72,5 @@ Runtime upgrades require changing the dependency, reported version or profile,
 and rerunning protocol, negative-feature, standard Go fixture, race, security,
 and cross-platform suites. Worker compiled-cache keys must include the exact
 runtime version, engine, ABI, Host API profile, feature profile, and target
-platform. The future Worker runtime must configure WASI with no inherited
-arguments, environment, filesystem preopens, or network access and prove those
-execution properties separately.
+platform. Worker execution and its no-inheritance guarantees are locked in ADR
+0005.

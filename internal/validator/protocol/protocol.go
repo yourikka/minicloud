@@ -9,21 +9,21 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"slices"
 
 	"github.com/yourikka/minicloud/internal/digest"
 	"github.com/yourikka/minicloud/internal/model"
 	"github.com/yourikka/minicloud/internal/problem"
 	"github.com/yourikka/minicloud/internal/strictjson"
+	"github.com/yourikka/minicloud/internal/wasmprofile"
 )
 
 const (
 	SchemaVersion        = "validator-v1"
-	RuntimeName          = "wazero"
-	RuntimeVersion       = "v1.12.0"
-	FeatureProfile       = "wazero-core-v2-v1"
-	EngineCompiler       = "compiler"
-	EngineInterpreter    = "interpreter"
+	RuntimeName          = wasmprofile.RuntimeName
+	RuntimeVersion       = wasmprofile.RuntimeVersion
+	FeatureProfile       = wasmprofile.FeatureProfile
+	EngineCompiler       = wasmprofile.EngineCompiler
+	EngineInterpreter    = wasmprofile.EngineInterpreter
 	MaxHeaderBytes       = 64 << 10
 	MaxReportBytes       = 256 << 10
 	DefaultArtifactBytes = int64(32 << 20)
@@ -34,7 +34,6 @@ const (
 var (
 	frameMagic          = [8]byte{'M', 'C', 'V', 'A', 'L', '0', '0', '1'}
 	validationIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	memoryTiersMiB      = []uint32{64, 128, 256, 512}
 )
 
 // Request is trusted policy metadata followed by untrusted Artifact bytes.
@@ -247,7 +246,7 @@ func (r Request) Validate() error {
 	if r.RuntimeEngine != EngineCompiler && r.RuntimeEngine != EngineInterpreter {
 		return errors.New("validator protocol: unsupported runtime engine")
 	}
-	if !slices.Contains(memoryTiersMiB, r.MemoryLimitMiB) {
+	if !wasmprofile.ValidMemoryTier(r.MemoryLimitMiB) {
 		return errors.New("validator protocol: unsupported memory tier")
 	}
 	if r.RequestedCapabilities == nil {

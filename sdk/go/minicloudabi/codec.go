@@ -40,6 +40,12 @@ type Limits struct {
 	PathBytes        int
 }
 
+// Validate checks that every non-zero override only lowers a v1 limit.
+func (l Limits) Validate() error {
+	_, err := normalizeLimits(l)
+	return err
+}
+
 // DecodeRequest reads and validates exactly one Request JSON value.
 func DecodeRequest(source io.Reader, limits Limits) (Request, error) {
 	limits, err := normalizeLimits(limits)
