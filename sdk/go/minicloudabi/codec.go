@@ -46,6 +46,37 @@ func (l Limits) Validate() error {
 	return err
 }
 
+// Effective returns limits with every zero field replaced by its v1 default.
+func (l Limits) Effective() (Limits, error) {
+	return normalizeLimits(l)
+}
+
+// Tighten applies an additional set of limits without allowing any existing
+// bound to increase. Zero override fields retain the current effective bound.
+func (l Limits) Tighten(override Limits) (Limits, error) {
+	base, err := normalizeLimits(l)
+	if err != nil {
+		return Limits{}, err
+	}
+	requested, err := normalizeLimits(override)
+	if err != nil {
+		return Limits{}, err
+	}
+	return Limits{
+		RawEnvelopeBytes: min(base.RawEnvelopeBytes, requested.RawEnvelopeBytes),
+		MetadataBytes:    min(base.MetadataBytes, requested.MetadataBytes),
+		BodyBytes:        min(base.BodyBytes, requested.BodyBytes),
+		HeaderCount:      min(base.HeaderCount, requested.HeaderCount),
+		HeaderBytes:      min(base.HeaderBytes, requested.HeaderBytes),
+		HeaderValueBytes: min(base.HeaderValueBytes, requested.HeaderValueBytes),
+		QueryPairs:       min(base.QueryPairs, requested.QueryPairs),
+		QueryBytes:       min(base.QueryBytes, requested.QueryBytes),
+		JSONDepth:        min(base.JSONDepth, requested.JSONDepth),
+		MethodBytes:      min(base.MethodBytes, requested.MethodBytes),
+		PathBytes:        min(base.PathBytes, requested.PathBytes),
+	}, nil
+}
+
 // DecodeRequest reads and validates exactly one Request JSON value.
 func DecodeRequest(source io.Reader, limits Limits) (Request, error) {
 	limits, err := normalizeLimits(limits)

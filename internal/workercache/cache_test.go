@@ -720,6 +720,10 @@ func (c *compilerProbe) Profile() wasmprofile.Profile {
 	return c.base.Profile()
 }
 
+func (c *compilerProbe) ExecutionLimits() wasmexec.ExecutionLimits {
+	return c.base.ExecutionLimits()
+}
+
 func (c *compilerProbe) Calls() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

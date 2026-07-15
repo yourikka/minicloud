@@ -7,7 +7,23 @@ import (
 	"time"
 
 	"github.com/yourikka/minicloud/internal/problem"
+	abi "github.com/yourikka/minicloud/sdk/go/minicloudabi"
 )
+
+func TestProgramInvokeWithAcceptanceRejectsNilHook(t *testing.T) {
+	t.Parallel()
+	program := &Program{}
+
+	_, err := program.InvokeWithAcceptance(
+		context.Background(),
+		abi.Request{},
+		InvocationPolicy{Timeout: time.Second},
+		InvocationAcceptance{},
+	)
+	if err == nil || err.Error() != "wasmexec invocation acceptance is required" {
+		t.Fatalf("InvokeWithAcceptance() error = %v, want required acceptance error", err)
+	}
+}
 
 func TestCompileRejectsIncompatibleCommandModules(t *testing.T) {
 	engine, err := New(context.Background(), Config{})
@@ -28,14 +44,14 @@ func TestCompileRejectsIncompatibleCommandModules(t *testing.T) {
 
 func TestLimiterRejectsAFullQueue(t *testing.T) {
 	limiter := newLimiter(1, 1)
-	if err := limiter.acquire(context.Background()); err != nil {
+	if err := limiter.acquire(context.Background(), nil, nil); err != nil {
 		t.Fatalf("first acquire error = %v", err)
 	}
 	defer limiter.release()
 
 	queuedContext, cancelQueued := context.WithCancel(context.Background())
 	queued := make(chan error, 1)
-	go func() { queued <- limiter.acquire(queuedContext) }()
+	go func() { queued <- limiter.acquire(queuedContext, nil, nil) }()
 	deadline := time.Now().Add(time.Second)
 	for len(limiter.queue) != 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -43,10 +59,57 @@ func TestLimiterRejectsAFullQueue(t *testing.T) {
 	if len(limiter.queue) != 1 {
 		t.Fatal("second acquire did not enter the bounded queue")
 	}
-	err := limiter.acquire(context.Background())
+	err := limiter.acquire(context.Background(), nil, nil)
 	assertProblemCode(t, err, problem.CodeOverloaded)
 	cancelQueued()
 	assertProblemCode(t, <-queued, problem.CodeFunctionTimeout)
+}
+
+func TestLimiterWakesWhenPreAcceptanceStops(t *testing.T) {
+	limiter := newLimiter(1, 1)
+	if err := limiter.acquire(context.Background(), nil, nil); err != nil {
+		t.Fatalf("first acquire error = %v", err)
+	}
+	defer limiter.release()
+
+	stop := make(chan struct{})
+	queued := make(chan error, 1)
+	go func() { queued <- limiter.acquire(context.Background(), stop, nil) }()
+	deadline := time.Now().Add(time.Second)
+	for len(limiter.queue) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(limiter.queue) != 1 {
+		t.Fatal("second acquire did not enter the bounded queue")
+	}
+	close(stop)
+	if err := <-queued; !errors.Is(err, ErrAcceptanceStopped) {
+		t.Fatalf("queued acquire error = %v, want acceptance stopped", err)
+	}
+}
+
+func TestExecutionLimitsExposeRuntimeAdmissionCapacity(t *testing.T) {
+	engine, err := New(context.Background(), Config{
+		MaxConcurrent:           7,
+		MaxConcurrentPerProgram: 3,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() {
+		if err := engine.Close(context.Background()); err != nil {
+			t.Errorf("Engine.Close() error = %v", err)
+		}
+	}()
+
+	limits := engine.ExecutionLimits()
+	if limits.MaxConcurrent != 7 || limits.MaxConcurrentPerProgram != 3 {
+		t.Fatalf(
+			"ExecutionLimits() concurrency = global %d, program %d; want 7 and 3",
+			limits.MaxConcurrent,
+			limits.MaxConcurrentPerProgram,
+		)
+	}
 }
 
 func TestLifecycleCloseWaitsWithContextAndRetriesRelease(t *testing.T) {

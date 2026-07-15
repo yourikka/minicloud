@@ -23,12 +23,13 @@ type ArtifactSource interface {
 type Compiler interface {
 	Compile(context.Context, []byte) (*wasmexec.Program, wasmexec.Metrics, error)
 	Profile() wasmprofile.Profile
+	ExecutionLimits() wasmexec.ExecutionLimits
 }
 
 // InvocationRequest groups the typed ABI input with its host timeout.
 type InvocationRequest struct {
 	Request abi.Request
-	Timeout time.Duration
+	Policy  wasmexec.InvocationPolicy
 }
 
 func (c *Cache) loadAndCompile(
