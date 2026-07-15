@@ -36,6 +36,24 @@ func TestRequestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLimitsTightenNeverWidensBase(t *testing.T) {
+	t.Parallel()
+	base := abi.Limits{BodyBytes: 1024, HeaderCount: 8}
+	effective, err := base.Tighten(abi.Limits{BodyBytes: 512, HeaderCount: 16})
+	if err != nil {
+		t.Fatalf("Tighten() error = %v", err)
+	}
+	if effective.BodyBytes != 512 || effective.HeaderCount != 8 {
+		t.Fatalf("Tighten() = body %d, headers %d; want 512 and 8", effective.BodyBytes, effective.HeaderCount)
+	}
+	if effective.RawEnvelopeBytes != abi.DefaultRawEnvelopeBytes {
+		t.Fatalf("default raw envelope = %d, want %d", effective.RawEnvelopeBytes, abi.DefaultRawEnvelopeBytes)
+	}
+	if _, err := base.Tighten(abi.Limits{BodyBytes: abi.DefaultBodyBytes + 1}); err == nil {
+		t.Fatal("Tighten() accepted an override above the v1 hard limit")
+	}
+}
+
 func TestDecodeRequestMergesHeaderCaseInWireOrder(t *testing.T) {
 	t.Parallel()
 

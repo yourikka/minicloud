@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,233 @@ func TestProgramInvokesStandardGoWithFreshStateAndNoHostInheritance(t *testing.T
 		if len(result.GuestLog) != 0 || result.DroppedLogBytes != 0 {
 			t.Fatalf("healthy call produced guest logs: %+v", result)
 		}
+	}
+}
+
+func TestProgramInvokeWithAcceptanceCallsHookOnce(t *testing.T) {
+	engine, program := openStandardGoProgram(t, Config{})
+	defer closeEngineAndProgram(t, engine, program)
+
+	acceptCalls := 0
+	result, err := program.InvokeWithAcceptance(
+		context.Background(),
+		validRequest("accepted"),
+		InvocationPolicy{Timeout: time.Second},
+		InvocationAcceptance{
+			Check: func() error {
+				acceptCalls++
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("InvokeWithAcceptance() error = %v", err)
+	}
+	if acceptCalls != 1 {
+		t.Fatalf("accept calls = %d, want 1", acceptCalls)
+	}
+	if !strings.HasPrefix(string(result.Response.Body), "1|") {
+		t.Fatalf("response body = %q, want healthy fixture response", result.Response.Body)
+	}
+}
+
+func TestProgramInvokeWithAcceptanceRejectsCanceledParentBeforeHook(t *testing.T) {
+	engine, program := openStandardGoProgram(t, Config{})
+	defer closeEngineAndProgram(t, engine, program)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	acceptCalls := 0
+	_, err := program.InvokeWithAcceptance(
+		ctx,
+		validRequest("canceled"),
+		InvocationPolicy{Timeout: time.Second},
+		InvocationAcceptance{
+			Check: func() error {
+				acceptCalls++
+				return nil
+			},
+		},
+	)
+	assertProblemCode(t, err, problem.CodeFunctionTimeout)
+	if acceptCalls != 0 {
+		t.Fatalf("accept calls after parent cancellation = %d, want 0", acceptCalls)
+	}
+}
+
+func TestProgramInvokeWithAcceptanceStopsWhileWaitingForRuntimePermit(t *testing.T) {
+	engine, program := openStandardGoProgram(t, Config{
+		MaxConcurrent:           2,
+		MaxConcurrentPerProgram: 1,
+	})
+	defer closeEngineAndProgram(t, engine, program)
+
+	blockerContext, cancelBlocker := context.WithCancel(context.Background())
+	defer cancelBlocker()
+	blockerDone := make(chan error, 1)
+	go func() {
+		_, err := program.Invoke(blockerContext, validRequest("sleep"), 5*time.Second)
+		blockerDone <- err
+	}()
+	waitForCount(t, func() int { return len(program.limiter.slots) }, 1)
+
+	stop := make(chan struct{})
+	var acceptCalls atomic.Int32
+	queuedDone := make(chan error, 1)
+	go func() {
+		_, err := program.InvokeWithAcceptance(
+			context.Background(),
+			validRequest("queued"),
+			InvocationPolicy{Timeout: 5 * time.Second},
+			InvocationAcceptance{
+				Stop: stop,
+				Check: func() error {
+					acceptCalls.Add(1)
+					return nil
+				},
+			},
+		)
+		queuedDone <- err
+	}()
+	waitForCount(t, func() int { return len(program.limiter.queue) }, 1)
+	close(stop)
+	if err := <-queuedDone; !errors.Is(err, ErrAcceptanceStopped) {
+		t.Fatalf("queued InvokeWithAcceptance() error = %v, want acceptance stopped", err)
+	}
+	if calls := acceptCalls.Load(); calls != 0 {
+		t.Fatalf("accept calls after admission stop = %d, want 0", calls)
+	}
+
+	cancelBlocker()
+	assertProblemCode(t, <-blockerDone, problem.CodeFunctionTimeout)
+}
+
+func TestProgramInvokeWithAcceptanceRunsAfterProgramAndWorkerPermits(t *testing.T) {
+	wasm := buildStandardGoFixture(t)
+	engine, err := New(context.Background(), Config{
+		MaxConcurrent:           1,
+		MaxQueue:                1,
+		MaxConcurrentPerProgram: 1,
+		MaxQueuePerProgram:      1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	programA, _, err := engine.Compile(context.Background(), wasm)
+	if err != nil {
+		_ = engine.Close(context.Background())
+		t.Fatalf("Compile(A) error = %v", err)
+	}
+	programB, _, err := engine.Compile(context.Background(), wasm)
+	if err != nil {
+		_ = programA.Close(context.Background())
+		_ = engine.Close(context.Background())
+		t.Fatalf("Compile(B) error = %v", err)
+	}
+	defer func() {
+		if err := programA.Close(context.Background()); err != nil {
+			t.Errorf("Program A Close() error = %v", err)
+		}
+		if err := programB.Close(context.Background()); err != nil {
+			t.Errorf("Program B Close() error = %v", err)
+		}
+		if err := engine.Close(context.Background()); err != nil {
+			t.Errorf("Engine Close() error = %v", err)
+		}
+	}()
+
+	workerContext, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	workerDone := make(chan error, 1)
+	go func() {
+		_, err := programB.Invoke(workerContext, validRequest("sleep"), 5*time.Second)
+		workerDone <- err
+	}()
+	waitForCount(t, func() int { return len(programB.limiter.slots) }, 1)
+	waitForCount(t, func() int { return len(engine.limiter.slots) }, 1)
+
+	programContext, cancelProgram := context.WithCancel(context.Background())
+	defer cancelProgram()
+	programDone := make(chan error, 1)
+	go func() {
+		_, err := programA.Invoke(programContext, validRequest("queued"), 5*time.Second)
+		programDone <- err
+	}()
+	waitForCount(t, func() int { return len(programA.limiter.slots) }, 1)
+	waitForCount(t, func() int { return len(engine.limiter.queue) }, 1)
+
+	rejection := errors.New("invocation rejected at acceptance")
+	var acquireCalls atomic.Int32
+	var releaseCalls atomic.Int32
+	var acceptCalls atomic.Int32
+	type invocationOutcome struct {
+		result Result
+		err    error
+	}
+	acceptContext, cancelAccept := context.WithCancel(context.Background())
+	defer cancelAccept()
+	acceptDone := make(chan invocationOutcome, 1)
+	go func() {
+		result, err := programA.InvokeWithAcceptance(
+			acceptContext,
+			validRequest("rejected"),
+			InvocationPolicy{Timeout: 5 * time.Second},
+			InvocationAcceptance{
+				Acquire: func() (func(), error) {
+					acquireCalls.Add(1)
+					return func() { releaseCalls.Add(1) }, nil
+				},
+				Check: func() error {
+					acceptCalls.Add(1)
+					return rejection
+				},
+			},
+		)
+		acceptDone <- invocationOutcome{result: result, err: err}
+	}()
+	waitForCount(t, func() int { return len(programA.limiter.queue) }, 1)
+	if calls := acceptCalls.Load(); calls != 0 {
+		t.Fatalf("accept calls while waiting for Program permit = %d, want 0", calls)
+	}
+	if calls := acquireCalls.Load(); calls != 0 {
+		t.Fatalf("admission acquire calls while waiting for Program permit = %d, want 0", calls)
+	}
+
+	cancelProgram()
+	assertProblemCode(t, <-programDone, problem.CodeFunctionTimeout)
+	waitForCount(t, func() int { return len(programA.limiter.queue) }, 0)
+	waitForCount(t, func() int { return len(programA.limiter.slots) }, 1)
+	waitForCount(t, func() int { return len(engine.limiter.queue) }, 1)
+	if calls := acceptCalls.Load(); calls != 0 {
+		t.Fatalf("accept calls while waiting for Worker permit = %d, want 0", calls)
+	}
+	if calls := acquireCalls.Load(); calls != 1 {
+		t.Fatalf("admission acquire calls after Program permit = %d, want 1", calls)
+	}
+
+	cancelWorker()
+	assertProblemCode(t, <-workerDone, problem.CodeFunctionTimeout)
+	outcome := <-acceptDone
+	if outcome.err != rejection {
+		t.Fatalf("InvokeWithAcceptance() error = %v, want original rejection %v", outcome.err, rejection)
+	}
+	if calls := acceptCalls.Load(); calls != 1 {
+		t.Fatalf("accept calls = %d, want 1", calls)
+	}
+	if calls := releaseCalls.Load(); calls != 1 {
+		t.Fatalf("admission release calls = %d, want 1", calls)
+	}
+	if outcome.result.Metrics.Instantiate != 0 || outcome.result.Metrics.Execute != 0 {
+		t.Fatalf(
+			"rejected invocation metrics = instantiate %s, execute %s; want both zero",
+			outcome.result.Metrics.Instantiate,
+			outcome.result.Metrics.Execute,
+		)
+	}
+
+	healthy, healthyErr := programA.Invoke(context.Background(), validRequest("healthy"), time.Second)
+	if healthyErr != nil || !strings.HasPrefix(string(healthy.Response.Body), "1|") {
+		t.Fatalf("healthy call after rejection = (%q, %v)", healthy.Response.Body, healthyErr)
 	}
 }
 

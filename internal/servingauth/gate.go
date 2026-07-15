@@ -133,6 +133,43 @@ func (g *Gate) AcceptAuthoritativeControl(connection ControlConnection) error {
 	return nil
 }
 
+// CheckAssignment verifies that a trusted control connection may prepare the
+// exact Assignment without creating or refreshing serving permission.
+func (g *Gate) CheckAssignment(
+	connection ControlConnection,
+	fence InvocationFence,
+) error {
+	if err := connection.validate(); err != nil {
+		return err
+	}
+	if err := fence.validate(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.currentControlLocked(connection) || fence.DiscoveryEpoch != connection.DiscoveryEpoch {
+		return classified(problem.CodeStaleAssignment, "authenticated control connection is unavailable")
+	}
+	if fence.Assignment.Worker != g.currentWorkerLocked() {
+		return classified(problem.CodeStaleAssignment, "assignment targets another worker session")
+	}
+	return nil
+}
+
+// CheckControl verifies that connection is the exact currently authenticated
+// authoritative control channel without mutating Gate state.
+func (g *Gate) CheckControl(connection ControlConnection) error {
+	if err := connection.validate(); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.currentControlLocked(connection) {
+		return classified(problem.CodeStaleAssignment, "authenticated control connection is unavailable")
+	}
+	return nil
+}
+
 // DisconnectControl invalidates live-only permissions bound to this exact
 // connection. TTL permissions continue until their local monotonic expiry.
 func (g *Gate) DisconnectControl(connection ControlConnection) {

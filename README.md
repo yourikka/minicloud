@@ -12,8 +12,10 @@ watchdog. A Worker-side WASI Command execution core now provides fresh guest
 instances, strict ABI I/O, deadlines, bounded logs/output, and default-deny host
 resources. Its verified loader coalesces cold loads and owns a bounded,
 lease-pinned compiled LRU cache. A boot-local Serving Authorization gate fences
-old Worker sessions and Leader epochs before synchronous work starts. It does
-not yet claim a runnable `v0.1-core` cluster.
+old Worker sessions and Leader epochs before synchronous work starts. A Worker
+Agent now binds those pieces into policy-verified Ready Replicas and performs
+post-queue, pre-instantiation authorization for synchronous calls. It does not
+yet claim a runnable `v0.1-core` cluster.
 
 ## Development
 

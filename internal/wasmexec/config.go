@@ -60,9 +60,11 @@ func normalizeConfig(config Config) (Config, error) {
 		config.MaxLogLineBytes < 1 || config.MaxLogLineBytes > DefaultMaxLogLineBytes {
 		return Config{}, errors.New("wasmexec log limit is outside v1 bounds")
 	}
-	if err := config.ABILimits.Validate(); err != nil {
+	effectiveABILimits, err := config.ABILimits.Effective()
+	if err != nil {
 		return Config{}, errors.New("wasmexec abi limits are outside v1 bounds")
 	}
+	config.ABILimits = effectiveABILimits
 	return config, nil
 }
 

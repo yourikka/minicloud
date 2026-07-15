@@ -425,6 +425,82 @@ func TestInstallRejectsUntrustedConnectionAndWrongWorker(t *testing.T) {
 	}
 }
 
+func TestCheckAssignmentRequiresExactCurrentControlAndWorker(t *testing.T) {
+	t.Parallel()
+	gate := newTestGate(t, newManualClock(0), Config{})
+	connection := controlConnection("control-1", 1, 10)
+	fence := ttlAuthorization(assignment(1, "assignment-1"), 10, time.Minute).Fence
+
+	assertProblemCode(t, gate.CheckAssignment(connection, fence), problem.CodeStaleAssignment)
+	if err := gate.AcceptAuthoritativeControl(connection); err != nil {
+		t.Fatalf("AcceptAuthoritativeControl() error = %v", err)
+	}
+	if err := gate.CheckControl(connection); err != nil {
+		t.Fatalf("CheckControl() error = %v", err)
+	}
+	assertProblemCode(
+		t,
+		gate.CheckControl(controlConnection("control-2", 1, 10)),
+		problem.CodeStaleAssignment,
+	)
+	if err := gate.CheckAssignment(connection, fence); err != nil {
+		t.Fatalf("CheckAssignment() error = %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		connection ControlConnection
+		fence      InvocationFence
+	}{
+		{
+			name:       "different connection",
+			connection: controlConnection("control-2", 1, 10),
+			fence:      fence,
+		},
+		{
+			name:       "different discovery epoch",
+			connection: connection,
+			fence: InvocationFence{
+				Assignment:     fence.Assignment,
+				DiscoveryEpoch: 11,
+			},
+		},
+		{
+			name:       "different worker session",
+			connection: connection,
+			fence: InvocationFence{
+				Assignment: AssignmentIdentity{
+					Worker: WorkerSession{
+						WorkerID:     "worker-1",
+						BootID:       "boot-1",
+						SessionEpoch: 2,
+					},
+					AssignmentID:         fence.Assignment.AssignmentID,
+					VersionID:            fence.Assignment.VersionID,
+					AdmissionEpoch:       fence.Assignment.AdmissionEpoch,
+					DeploymentGeneration: fence.Assignment.DeploymentGeneration,
+					PolicyDigest:         fence.Assignment.PolicyDigest,
+					Mode:                 fence.Assignment.Mode,
+				},
+				DiscoveryEpoch: fence.DiscoveryEpoch,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assertProblemCode(
+				t,
+				gate.CheckAssignment(test.connection, test.fence),
+				problem.CodeStaleAssignment,
+			)
+		})
+	}
+	if snapshot := gate.Snapshot(); snapshot.TrackedAssignments != 0 || snapshot.StoredAuthorizations != 0 {
+		t.Fatalf("CheckAssignment() mutated authorization state: %+v", snapshot)
+	}
+}
+
 func newTestGate(t *testing.T, clock *manualClock, overrides Config) *Gate {
 	t.Helper()
 	config := overrides

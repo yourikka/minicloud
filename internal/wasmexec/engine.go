@@ -34,6 +34,10 @@ const (
 
 var errOutputLimit = errors.New("wasm stdout exceeds limit")
 
+// ErrAcceptanceStopped reports that a higher-level owner stopped admission
+// before the invocation reached its acceptance point.
+var ErrAcceptanceStopped = errors.New("wasmexec invocation acceptance stopped")
+
 // Config defines one Worker's bounded runtime pool.
 type Config struct {
 	Engine                  string
@@ -66,6 +70,38 @@ type Result struct {
 	Metrics         Metrics
 }
 
+// InvocationPolicy contains per-Assignment limits that may only tighten the
+// Engine's immutable Worker-wide hard bounds.
+type InvocationPolicy struct {
+	Timeout         time.Duration
+	RequestLimits   abi.Limits
+	ResponseLimits  abi.Limits
+	MaxLogBytes     int
+	MaxLogLineBytes int
+}
+
+// InvocationAcceptance coordinates a higher-level admission boundary with the
+// runtime queues. Acquire runs after the Program permit and before the Engine
+// permit. Stop signals are observed only until Check succeeds, so revocation
+// never cancels an already accepted guest.
+type InvocationAcceptance struct {
+	Stop     <-chan struct{}
+	AlsoStop <-chan struct{}
+	Acquire  func() (release func(), err error)
+	Check    func() error
+}
+
+// ExecutionLimits is the immutable Worker runtime envelope applied before any
+// per-Assignment policy may tighten it.
+type ExecutionLimits struct {
+	MaxTimeout              time.Duration
+	MaxConcurrent           int
+	MaxConcurrentPerProgram int
+	ABILimits               abi.Limits
+	MaxLogBytes             int
+	MaxLogLineBytes         int
+}
+
 // Engine owns one wazero runtime and the shared WASI Preview 1 host module.
 type Engine struct {
 	runtime            wazero.Runtime
@@ -74,9 +110,9 @@ type Engine struct {
 	defaultTimeout     time.Duration
 	maxTimeout         time.Duration
 	abiLimits          abi.Limits
-	maxRawOutputBytes  int
 	maxLogBytes        int
 	maxLogLineBytes    int
+	maxConcurrent      int
 	programConcurrency int
 	programQueue       int
 	random             io.Reader
@@ -132,9 +168,9 @@ func New(ctx context.Context, config Config) (*Engine, error) {
 		defaultTimeout:     config.DefaultTimeout,
 		maxTimeout:         config.MaxTimeout,
 		abiLimits:          config.ABILimits,
-		maxRawOutputBytes:  rawEnvelopeLimit(config.ABILimits),
 		maxLogBytes:        config.MaxLogBytes,
 		maxLogLineBytes:    config.MaxLogLineBytes,
+		maxConcurrent:      config.MaxConcurrent,
 		programConcurrency: config.MaxConcurrentPerProgram,
 		programQueue:       config.MaxQueuePerProgram,
 		random:             &lockedReader{source: randomSource},
@@ -146,6 +182,18 @@ func New(ctx context.Context, config Config) (*Engine, error) {
 // Profile returns the immutable compilation profile owned by this Engine.
 func (e *Engine) Profile() wasmprofile.Profile {
 	return e.profile
+}
+
+// ExecutionLimits returns the immutable runtime hard bounds owned by Engine.
+func (e *Engine) ExecutionLimits() ExecutionLimits {
+	return ExecutionLimits{
+		MaxTimeout:              e.maxTimeout,
+		MaxConcurrent:           e.maxConcurrent,
+		MaxConcurrentPerProgram: e.programConcurrency,
+		ABILimits:               e.abiLimits,
+		MaxLogBytes:             e.maxLogBytes,
+		MaxLogLineBytes:         e.maxLogLineBytes,
+	}
 }
 
 // Compile compiles and rechecks one admitted module for repeated fresh-instance
@@ -198,6 +246,40 @@ func (p *Program) Invoke(
 	request abi.Request,
 	timeout time.Duration,
 ) (result Result, err error) {
+	return p.invoke(ctx, request, InvocationPolicy{Timeout: timeout}, nil)
+}
+
+// InvokeWithPolicy applies per-Assignment limits without an authorization
+// callback. Higher-level Worker serving paths use InvokeWithAcceptance.
+func (p *Program) InvokeWithPolicy(
+	ctx context.Context,
+	request abi.Request,
+	policy InvocationPolicy,
+) (result Result, err error) {
+	return p.invoke(ctx, request, policy, nil)
+}
+
+// InvokeWithAcceptance runs higher-level admission after the Program permit,
+// then checks acceptance after the Engine permit and immediately before guest
+// creation. A rejected or stopped call never instantiates guest code.
+func (p *Program) InvokeWithAcceptance(
+	ctx context.Context,
+	request abi.Request,
+	policy InvocationPolicy,
+	acceptance InvocationAcceptance,
+) (result Result, err error) {
+	if acceptance.Check == nil {
+		return Result{}, errors.New("wasmexec invocation acceptance is required")
+	}
+	return p.invoke(ctx, request, policy, &acceptance)
+}
+
+func (p *Program) invoke(
+	ctx context.Context,
+	request abi.Request,
+	policy InvocationPolicy,
+	acceptance *InvocationAcceptance,
+) (result Result, err error) {
 	if ctx == nil {
 		return Result{}, errors.New("wasmexec invocation context is required")
 	}
@@ -209,32 +291,50 @@ func (p *Program) Invoke(
 		return Result{}, errors.New("wasmexec program is closed")
 	}
 	defer p.lifecycle.end()
-	timeout, err = p.engine.normalizeTimeout(timeout)
+	policy, err = p.engine.normalizeInvocationPolicy(policy)
 	if err != nil {
 		return Result{}, err
 	}
-	invocationContext, cancel := isolatedContext(ctx, timeout)
+	invocationContext, cancel := isolatedContext(ctx, policy.Timeout)
 	defer cancel()
 	deadline, _ := invocationContext.Deadline()
 	request.DeadlineUnixMS = deadline.UnixMilli()
 
 	var stdin bytes.Buffer
-	if err := abi.EncodeRequest(&stdin, request, p.engine.abiLimits); err != nil {
+	if err := abi.EncodeRequest(&stdin, request, policy.RequestLimits); err != nil {
 		return Result{}, invocationError(problem.CodeInvalidArgument, "invalid invocation request")
 	}
 	queueStarted := time.Now()
-	if err := p.limiter.acquire(invocationContext); err != nil {
+	var stop, alsoStop <-chan struct{}
+	if acceptance != nil {
+		stop = acceptance.Stop
+		alsoStop = acceptance.AlsoStop
+	}
+	if err := p.limiter.acquire(invocationContext, stop, alsoStop); err != nil {
 		return Result{}, err
 	}
 	defer p.limiter.release()
-	if err := p.engine.limiter.acquire(invocationContext); err != nil {
+	if acceptance != nil && acceptance.Acquire != nil {
+		release, acquireErr := acceptance.Acquire()
+		if acquireErr != nil {
+			return Result{}, acquireErr
+		}
+		if release == nil {
+			return Result{}, errors.New("wasmexec invocation admission release is required")
+		}
+		defer release()
+	}
+	if err := p.engine.limiter.acquire(invocationContext, stop, alsoStop); err != nil {
 		return Result{}, err
 	}
 	defer p.engine.limiter.release()
 	result.Metrics.Queue = time.Since(queueStarted)
+	if invocationContext.Err() != nil {
+		return Result{}, invocationError(problem.CodeFunctionTimeout, "function execution deadline was exceeded while queued")
+	}
 
-	stdout := newBoundedOutput(p.engine.maxRawOutputBytes, cancel)
-	guestLog := newGuestLog(p.engine.maxLogBytes, p.engine.maxLogLineBytes)
+	stdout := newBoundedOutput(rawEnvelopeLimit(policy.ResponseLimits), cancel)
+	guestLog := newGuestLog(policy.MaxLogBytes, policy.MaxLogLineBytes)
 	moduleConfig := wazero.NewModuleConfig().
 		WithName("").
 		WithStartFunctions().
@@ -246,6 +346,14 @@ func (p *Program) Invoke(
 		WithNanosleep(cancelAwareNanosleep(invocationContext)).
 		WithOsyield(runtime.Gosched).
 		WithRandSource(p.engine.random)
+	if acceptance != nil {
+		if acceptanceStopped(stop, alsoStop) {
+			return Result{}, ErrAcceptanceStopped
+		}
+		if err := acceptance.Check(); err != nil {
+			return result, err
+		}
+	}
 
 	instantiateStarted := time.Now()
 	module, instantiateErr := p.engine.runtime.InstantiateModule(invocationContext, p.compiled, moduleConfig)
@@ -275,12 +383,42 @@ func (p *Program) Invoke(
 	if stdout.Exceeded() {
 		return result, invocationError(problem.CodeOutputLimit, "function output exceeded its limit")
 	}
-	response, decodeErr := abi.DecodeResponse(bytes.NewReader(stdout.Bytes()), request.Method, p.engine.abiLimits)
+	response, decodeErr := abi.DecodeResponse(bytes.NewReader(stdout.Bytes()), request.Method, policy.ResponseLimits)
 	if decodeErr != nil {
 		return result, invocationError(problem.CodeInvalidFunctionResponse, "function returned an invalid response")
 	}
 	result.Response = response
 	return result, nil
+}
+
+func (e *Engine) normalizeInvocationPolicy(policy InvocationPolicy) (InvocationPolicy, error) {
+	timeout, err := e.normalizeTimeout(policy.Timeout)
+	if err != nil {
+		return InvocationPolicy{}, err
+	}
+	requestLimits, err := e.abiLimits.Tighten(policy.RequestLimits)
+	if err != nil {
+		return InvocationPolicy{}, errors.New("wasmexec request limits are outside configured bounds")
+	}
+	responseLimits, err := e.abiLimits.Tighten(policy.ResponseLimits)
+	if err != nil {
+		return InvocationPolicy{}, errors.New("wasmexec response limits are outside configured bounds")
+	}
+	if policy.MaxLogBytes == 0 {
+		policy.MaxLogBytes = e.maxLogBytes
+	}
+	if policy.MaxLogLineBytes == 0 {
+		policy.MaxLogLineBytes = e.maxLogLineBytes
+	}
+	invalidLogs := policy.MaxLogBytes < 1 || policy.MaxLogBytes > e.maxLogBytes ||
+		policy.MaxLogLineBytes < 1 || policy.MaxLogLineBytes > e.maxLogLineBytes
+	if invalidLogs {
+		return InvocationPolicy{}, errors.New("wasmexec invocation log limits are outside configured bounds")
+	}
+	policy.Timeout = timeout
+	policy.RequestLimits = requestLimits
+	policy.ResponseLimits = responseLimits
+	return policy, nil
 }
 
 // Close releases the compiled program after in-flight invocations finish.
@@ -328,12 +466,7 @@ func isolatedContext(parent context.Context, timeout time.Duration) (context.Con
 	if parentDeadline, exists := parent.Deadline(); exists && parentDeadline.Before(deadline) {
 		deadline = parentDeadline
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	stop := context.AfterFunc(parent, cancel)
-	return ctx, func() {
-		stop()
-		cancel()
-	}
+	return context.WithDeadline(parent, deadline)
 }
 
 func cancelAwareNanosleep(ctx context.Context) sys.Nanosleep {

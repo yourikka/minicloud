@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yourikka/minicloud/internal/wasmexec"
+	"github.com/yourikka/minicloud/internal/wasmprofile"
 )
 
 const (
@@ -76,12 +77,13 @@ type Stats struct {
 
 // Cache is safe for concurrent use.
 type Cache struct {
-	artifacts      ArtifactSource
-	compiler       Compiler
-	profile        Profile
-	maxWeightBytes int64
-	maxEntries     int
-	loadGate       *loadGate
+	artifacts       ArtifactSource
+	compiler        Compiler
+	profile         Profile
+	executionLimits wasmexec.ExecutionLimits
+	maxWeightBytes  int64
+	maxEntries      int
+	loadGate        *loadGate
 
 	mu            sync.Mutex
 	entries       map[Key]*entry
@@ -171,15 +173,16 @@ func New(config Config) (*Cache, error) {
 	drained := make(chan struct{})
 	close(drained)
 	return &Cache{
-		artifacts:      config.Artifacts,
-		compiler:       config.Compiler,
-		profile:        profile,
-		maxWeightBytes: config.MaxWeightBytes,
-		maxEntries:     config.MaxEntries,
-		loadGate:       newLoadGate(config.MaxConcurrentLoads, config.MaxQueuedLoads),
-		entries:        make(map[Key]*entry),
-		flights:        make(map[Key]*flight),
-		drained:        drained,
+		artifacts:       config.Artifacts,
+		compiler:        config.Compiler,
+		profile:         profile,
+		executionLimits: config.Compiler.ExecutionLimits(),
+		maxWeightBytes:  config.MaxWeightBytes,
+		maxEntries:      config.MaxEntries,
+		loadGate:        newLoadGate(config.MaxConcurrentLoads, config.MaxQueuedLoads),
+		entries:         make(map[Key]*entry),
+		flights:         make(map[Key]*flight),
+		drained:         drained,
 	}, nil
 }
 
@@ -277,7 +280,33 @@ func (l *Lease) Invoke(
 	if l.released {
 		return wasmexec.Result{}, errors.New("worker cache lease is released")
 	}
-	return l.entry.program.Invoke(ctx, request.Request, request.Timeout)
+	return l.entry.program.InvokeWithPolicy(ctx, request.Request, request.Policy)
+}
+
+// InvokeWithAcceptance delegates to the pinned Program and requires one
+// post-queue, pre-instantiation serving decision.
+func (l *Lease) InvokeWithAcceptance(
+	ctx context.Context,
+	request InvocationRequest,
+	acceptance wasmexec.InvocationAcceptance,
+) (wasmexec.Result, error) {
+	if l == nil || l.entry == nil {
+		return wasmexec.Result{}, errors.New("worker cache lease is invalid")
+	}
+	if acceptance.Check == nil {
+		return wasmexec.Result{}, errors.New("worker cache invocation acceptance is required")
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.released {
+		return wasmexec.Result{}, errors.New("worker cache lease is released")
+	}
+	return l.entry.program.InvokeWithAcceptance(
+		ctx,
+		request.Request,
+		request.Policy,
+		acceptance,
+	)
 }
 
 // Release unpins the cache entry. It is idempotent.
@@ -305,6 +334,18 @@ func (c *Cache) Snapshot() Stats {
 	stats.CurrentWeight = c.currentWeight
 	stats.Inflight = len(c.flights)
 	return stats
+}
+
+// Profile returns the immutable runtime compilation profile used by cache
+// keys. Assignments with a different memory tier require another Cache.
+func (c *Cache) Profile() wasmprofile.Profile {
+	return c.profile.runtime
+}
+
+// ExecutionLimits returns the immutable invocation hard bounds of the Engine
+// that compiles every Program in this Cache.
+func (c *Cache) ExecutionLimits() wasmexec.ExecutionLimits {
+	return c.executionLimits
 }
 
 // Close rejects new loads, cancels cold work, waits for leases, and releases
