@@ -14,8 +14,10 @@ resources. Its verified loader coalesces cold loads and owns a bounded,
 lease-pinned compiled LRU cache. A boot-local Serving Authorization gate fences
 old Worker sessions and Leader epochs before synchronous work starts. A Worker
 Agent now binds those pieces into policy-verified Ready Replicas and performs
-post-queue, pre-instantiation authorization for synchronous calls. It does not
-yet claim a runnable `v0.1-core` cluster.
+post-queue, pre-instantiation authorization for synchronous calls. A pure
+`sha256-bps-v1` Route selector provides fixed-vector weighted Target decisions
+without mutating snapshots. It does not yet claim a runnable `v0.1-core`
+cluster.
 
 ## Development
 

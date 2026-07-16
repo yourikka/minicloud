@@ -131,6 +131,7 @@ func TestRouteValidateCore(t *testing.T) {
 		{name: "disabled with target", mutate: func(r *model.Route) { r.Enabled = false }, field: "targets"},
 		{name: "incorrect weight", mutate: func(r *model.Route) { r.Targets[0].WeightBasisPoints = 9_999 }, field: "targets"},
 		{name: "invalid salt size", mutate: func(r *model.Route) { r.Salt = []byte("short") }, field: "salt"},
+		{name: "legacy hash version", mutate: func(r *model.Route) { r.HashVersion = "sha256-v1" }, field: "hash_version"},
 		{name: "header source needs field", mutate: func(r *model.Route) { r.Affinity = model.AffinityHeader }, field: "affinity_header"},
 		{name: "multiple targets blocked in core", mutate: func(r *model.Route) {
 			r.Targets[0].WeightBasisPoints = 5_000
@@ -251,7 +252,7 @@ func validRoute() model.Route {
 			},
 		},
 		Affinity:    model.AffinityRequestID,
-		HashVersion: model.HashVersionSHA256V1,
+		HashVersion: model.HashVersionSHA256BPSV1,
 		SaltID:      "salt_01",
 		Salt:        []byte("0123456789abcdef"),
 		Enabled:     true,
