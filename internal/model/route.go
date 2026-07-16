@@ -11,7 +11,7 @@ import (
 const (
 	TotalRouteWeightBasisPoints = uint32(10_000)
 	MaxRouteTargets             = 32
-	HashVersionSHA256V1         = "sha256-v1"
+	HashVersionSHA256BPSV1      = "sha256-bps-v1"
 )
 
 var httpTokenPattern = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
@@ -75,7 +75,7 @@ func (r Route) Validate() error {
 	if err := r.validateAffinity(); err != nil {
 		return err
 	}
-	if r.HashVersion != HashVersionSHA256V1 {
+	if r.HashVersion != HashVersionSHA256BPSV1 {
 		return problem.Invalid("hash_version", "is not supported")
 	}
 	if !idPattern.MatchString(r.SaltID) {
