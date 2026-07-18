@@ -47,6 +47,15 @@ const (
 	SessionUnavailable SessionState = "Unavailable"
 )
 
+// DrainState is orthogonal to intent and session liveness.
+type DrainState string
+
+const (
+	DrainNotDraining DrainState = "NotDraining"
+	DrainDraining    DrainState = "Draining"
+	DrainDrained     DrainState = "Drained"
+)
+
 // RuntimeProfile describes the exact runtime compatibility advertised by a
 // Worker. It is an eligibility input, not a cache preference.
 type RuntimeProfile struct {
@@ -82,6 +91,7 @@ type WorkerSnapshot struct {
 	Runtime  RuntimeProfile
 	Intent   SchedulingIntent
 	State    SessionState
+	Drain    DrainState
 	Capacity Capacity
 	Labels   map[string]string
 	Cache    CacheHints
@@ -192,6 +202,10 @@ func (s SessionState) valid() bool {
 		s == SessionSuspect || s == SessionUnavailable
 }
 
+func (d DrainState) valid() bool {
+	return d == DrainNotDraining || d == DrainDraining || d == DrainDrained
+}
+
 func (r RuntimeProfile) compatible(request PlacementRequest) bool {
 	return r.Name == request.RuntimeName &&
 		r.Version == request.RuntimeVersion &&
@@ -278,7 +292,7 @@ func (w WorkerSnapshot) validate() error {
 	if err := w.Session.Validate(); err != nil {
 		return err
 	}
-	if !w.Intent.valid() || !w.State.valid() {
+	if !w.Intent.valid() || !w.State.valid() || !w.Drain.valid() {
 		return problem.Invalid("worker_state", "intent or session state is unsupported")
 	}
 	if w.Runtime.Name != wasmprofile.RuntimeName || w.Runtime.Version != wasmprofile.RuntimeVersion ||
@@ -302,6 +316,12 @@ func (w WorkerSnapshot) validate() error {
 		}
 	}
 	return nil
+}
+
+// Validate checks an inventory observation before a registry or scheduler
+// accepts it.
+func (w WorkerSnapshot) Validate() error {
+	return w.validate()
 }
 
 func mapsClone(source map[string]string) map[string]string {

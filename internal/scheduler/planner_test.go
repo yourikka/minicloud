@@ -260,6 +260,7 @@ func readyWorker(id string, allocatedMemory, allocatedSlots uint64) WorkerSnapsh
 		},
 		Intent:   IntentSchedulable,
 		State:    SessionReady,
+		Drain:    DrainNotDraining,
 		Capacity: Capacity{MemoryMiB: 512, AllocatedMemoryMiB: allocatedMemory, Slots: 10, AllocatedSlots: allocatedSlots},
 	}
 }
