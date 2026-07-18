@@ -83,6 +83,11 @@ func (p WorkerProcess) validate() error {
 	return nil
 }
 
+// Validate checks the stable identity of one Worker boot.
+func (p WorkerProcess) Validate() error {
+	return p.validate()
+}
+
 func (s WorkerSession) validate() error {
 	if !identifierPattern.MatchString(s.WorkerID) {
 		return problem.Invalid("worker_id", "must be a valid identifier")
@@ -94,6 +99,11 @@ func (s WorkerSession) validate() error {
 		return problem.Invalid("session_epoch", "must be greater than zero")
 	}
 	return nil
+}
+
+// Validate checks the immutable Worker session fence.
+func (s WorkerSession) Validate() error {
+	return s.validate()
 }
 
 func (a AssignmentIdentity) validate() error {
@@ -121,6 +131,11 @@ func (a AssignmentIdentity) validate() error {
 	return nil
 }
 
+// Validate checks every immutable Assignment identity field.
+func (a AssignmentIdentity) Validate() error {
+	return a.validate()
+}
+
 func (f InvocationFence) validate() error {
 	if err := f.Assignment.validate(); err != nil {
 		return err
@@ -129,6 +144,11 @@ func (f InvocationFence) validate() error {
 		return problem.Invalid("discovery_epoch", "must be greater than zero")
 	}
 	return nil
+}
+
+// Validate checks the complete invocation fence.
+func (f InvocationFence) Validate() error {
+	return f.validate()
 }
 
 func (a Authorization) validate(maxTTL time.Duration) error {
@@ -161,4 +181,9 @@ func (c ControlConnection) validate() error {
 		return problem.Invalid("discovery_epoch", "must be greater than zero")
 	}
 	return nil
+}
+
+// Validate checks the transport-independent control connection identity.
+func (c ControlConnection) Validate() error {
+	return c.validate()
 }
