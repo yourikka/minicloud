@@ -91,6 +91,80 @@ func TestRouteStoreAllowsDisabledEmptyRouteForDisabledFunction(t *testing.T) {
 	}
 }
 
+func TestRouteStoreServingStatesAreConsistentAndDefensive(t *testing.T) {
+	t.Parallel()
+	catalog, _, store, version, deployment := readyRouteStore(t)
+
+	states, err := store.ServingStates()
+	if err != nil {
+		t.Fatalf("ServingStates() before route error = %v", err)
+	}
+	if len(states) != 1 || states[0].Function.ID != "function-01" || states[0].Trigger.FunctionID != "function-01" ||
+		states[0].Route != nil || states[0].Version != nil || states[0].Deployment != nil {
+		t.Fatalf("ServingStates() before route = %+v", states)
+	}
+
+	publishedAt := version.UpdatedAt.Add(time.Minute)
+	route := validRoute(version, deployment, 1, 5, publishedAt)
+	if _, _, err := store.Publish(PublishRouteCommand{
+		FunctionID: "function-01", Route: route, UpdatedAt: publishedAt, AppliedIndex: 5,
+	}); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	states, err = store.ServingStates()
+	if err != nil {
+		t.Fatalf("ServingStates() after route error = %v", err)
+	}
+	state := states[0]
+	if state.Route == nil || state.Version == nil || state.Deployment == nil ||
+		state.Function.ActiveRouteRevision != state.Route.RouteRevision ||
+		state.Route.Targets[0].VersionID != state.Version.VersionID ||
+		state.Route.Targets[0].AdmissionEpoch != state.Version.AdmissionEpoch ||
+		state.Route.Targets[0].DeploymentGeneration != state.Deployment.Generation ||
+		state.Route.Targets[0].EffectivePolicyDigest != state.Deployment.EffectivePolicyDigest {
+		t.Fatalf("ServingStates() = %+v, want one matching serving fence", state)
+	}
+
+	state.Function.Labels["mutated"] = "true"
+	state.Route.Salt[0] ^= 0xff
+	state.Route.Targets[0].WeightBasisPoints = 1
+	state.Version.RequestedCapabilities = append(state.Version.RequestedCapabilities, model.CapabilityRequest{})
+	reloaded, err := store.ServingStates()
+	if err != nil {
+		t.Fatalf("ServingStates() reload error = %v", err)
+	}
+	if reloaded[0].Function.Labels["mutated"] != "" || reloaded[0].Route.Salt[0] == state.Route.Salt[0] ||
+		reloaded[0].Route.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints ||
+		len(reloaded[0].Version.RequestedCapabilities) != len(version.RequestedCapabilities) {
+		t.Fatalf("ServingStates() exposed store memory: %+v", reloaded[0])
+	}
+
+	if _, err := catalog.SetFunctionLifecycle(SetFunctionLifecycleCommand{
+		FunctionID: "function-01", ExpectedResourceRevision: 2, Lifecycle: model.FunctionDisabled,
+		UpdatedAt: publishedAt.Add(time.Minute), AppliedIndex: 6,
+	}); err != nil {
+		t.Fatalf("SetFunctionLifecycle() error = %v", err)
+	}
+	disabledAt := publishedAt.Add(2 * time.Minute)
+	disabled := validRoute(version, deployment, 2, 7, disabledAt)
+	disabled.ID = "route-disabled"
+	disabled.Enabled = false
+	disabled.Targets = []model.RouteTarget{}
+	if _, _, err := store.Publish(PublishRouteCommand{
+		FunctionID: "function-01", ExpectedActiveRouteRevision: 1, Route: disabled, UpdatedAt: disabledAt, AppliedIndex: 7,
+	}); err != nil {
+		t.Fatalf("Publish(disabled) error = %v", err)
+	}
+	disabledStates, err := store.ServingStates()
+	if err != nil {
+		t.Fatalf("ServingStates() disabled route error = %v", err)
+	}
+	if disabledStates[0].Route == nil || disabledStates[0].Route.Enabled || disabledStates[0].Version != nil || disabledStates[0].Deployment != nil {
+		t.Fatalf("ServingStates() disabled route = %+v", disabledStates[0])
+	}
+}
+
 func readyRouteStore(t *testing.T) (*Catalog, *ReleaseStore, *RouteStore, model.Version, model.Deployment) {
 	t.Helper()
 	catalog := NewCatalog()

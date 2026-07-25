@@ -134,6 +134,14 @@ func TestControllerPublishesReadyVersionAsSingleTargetRoute(t *testing.T) {
 	if stored.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints || stored.Salt[0] == route.Salt[0] {
 		t.Fatalf("GetRoute() exposed route storage: %+v", stored)
 	}
+	states, err := controller.ListServingStates(context.Background())
+	if err != nil {
+		t.Fatalf("ListServingStates() error = %v", err)
+	}
+	if len(states) != 1 || states[0].Route == nil || states[0].Version == nil || states[0].Deployment == nil ||
+		states[0].Route.Targets[0].VersionID != admission.Version.VersionID {
+		t.Fatalf("ListServingStates() = %+v, want ready serving state", states)
+	}
 }
 
 func TestControllerRejectsNonReadyAndCrossFunctionRouteTarget(t *testing.T) {

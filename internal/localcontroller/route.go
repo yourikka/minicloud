@@ -111,3 +111,20 @@ func (c *Controller) GetRoute(ctx context.Context, functionID string) (model.Rou
 	}
 	return route, nil
 }
+
+// ListServingStates returns consistent, defensive copies of every Function's
+// serving inputs. It is intended for the trusted Local Core serving projector,
+// not a public management response because token verifier digests are present.
+func (c *Controller) ListServingStates(ctx context.Context) ([]controlplane.ServingState, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if c == nil || c.routes == nil {
+		return nil, errors.New("listing serving states: local controller route store is required")
+	}
+	states, err := c.routes.ServingStates()
+	if err != nil {
+		return nil, fmt.Errorf("listing serving states: %w", err)
+	}
+	return states, nil
+}

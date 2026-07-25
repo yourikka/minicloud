@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"sync"
@@ -30,6 +31,17 @@ type RouteStore struct {
 	mu       sync.Mutex
 	routes   map[string]model.Route
 	routeIDs map[string]struct{}
+}
+
+// ServingState is one complete Local Core input to a ServingSnapshot. Route,
+// Version, and Deployment are nil until an enabled Route has been published.
+// Every value is a defensive copy owned by the caller.
+type ServingState struct {
+	Function   model.Function
+	Trigger    HTTPTrigger
+	Route      *model.Route
+	Version    *model.Version
+	Deployment *model.Deployment
 }
 
 // NewRouteStore binds the current Route state to its Function and Version
@@ -152,6 +164,79 @@ func (s *RouteStore) Snapshot() []model.Route {
 		return 0
 	})
 	return routes
+}
+
+// ServingStates returns a consistent aggregate read for complete serving-view
+// construction. It takes the same Catalog -> ReleaseStore -> RouteStore lock
+// order as Publish so a caller cannot combine a Route with another target's
+// Version or Deployment fence.
+func (s *RouteStore) ServingStates() ([]ServingState, error) {
+	if s == nil || s.catalog == nil || s.releases == nil {
+		return nil, errors.New("control-plane route store dependencies are required")
+	}
+
+	s.catalog.mu.Lock()
+	s.releases.mu.Lock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.releases.mu.Unlock()
+	defer s.catalog.mu.Unlock()
+
+	states := make([]ServingState, 0, len(s.catalog.functionsByID))
+	for _, function := range s.catalog.functionsByID {
+		triggerID, exists := s.catalog.triggerIDByFunc[function.ID]
+		if !exists {
+			return nil, errors.New("catalog invariant: function has no default HTTP trigger")
+		}
+		trigger, exists := s.catalog.triggersByID[triggerID]
+		if !exists {
+			return nil, errors.New("catalog invariant: default HTTP trigger was not found")
+		}
+
+		state := ServingState{
+			Function: cloneFunction(function),
+			Trigger:  cloneHTTPTrigger(trigger),
+		}
+		route, present := s.routes[function.ID]
+		if !present {
+			if function.ActiveRouteRevision != 0 {
+				return nil, errors.New("route store invariant: function active route is missing")
+			}
+			states = append(states, state)
+			continue
+		}
+		if route.RouteRevision != function.ActiveRouteRevision {
+			return nil, errors.New("route store invariant: route revision does not match function")
+		}
+		if err := route.ValidateCore(); err != nil {
+			return nil, fmt.Errorf("route store invariant: validating persisted route: %w", err)
+		}
+		routeCopy := cloneControlRoute(route)
+		state.Route = &routeCopy
+		if route.Enabled {
+			if err := s.validateReadyTargetLocked(route, function); err != nil {
+				return nil, fmt.Errorf("route store invariant: validating ready target: %w", err)
+			}
+			target := route.Targets[0]
+			version, exists := s.releases.versions[target.VersionID]
+			if !exists {
+				return nil, errors.New("route store invariant: ready route version was not found")
+			}
+			deployment, exists := s.releases.deployments[target.VersionID]
+			if !exists {
+				return nil, errors.New("route store invariant: ready route deployment was not found")
+			}
+			versionCopy := cloneVersion(version)
+			deploymentCopy := cloneDeployment(deployment)
+			state.Version = &versionCopy
+			state.Deployment = &deploymentCopy
+		}
+		states = append(states, state)
+	}
+	slices.SortFunc(states, func(left, right ServingState) int {
+		return compareFunction(left.Function, right.Function)
+	})
+	return states, nil
 }
 
 func cloneControlRoute(route model.Route) model.Route {
