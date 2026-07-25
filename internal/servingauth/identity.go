@@ -66,6 +66,12 @@ type Authorization struct {
 	TTL      time.Duration
 }
 
+// Validate checks one complete authorization against the receiver's maximum
+// accepted TTL.
+func (a Authorization) Validate(maxTTL time.Duration) error {
+	return a.validate(maxTTL)
+}
+
 // ControlConnection identifies one authenticated Leader-to-Worker connection.
 type ControlConnection struct {
 	ConnectionID   string
