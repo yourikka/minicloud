@@ -45,3 +45,11 @@ type AdmissionResult struct {
 	Version    model.Version
 	Deployment *model.Deployment
 }
+
+// PublishRouteInput atomically points a Function at one Ready Version's
+// immutable Generation 1 policy. The expected revision is the Route CAS.
+type PublishRouteInput struct {
+	FunctionID                  string
+	VersionID                   string
+	ExpectedActiveRouteRevision uint64
+}

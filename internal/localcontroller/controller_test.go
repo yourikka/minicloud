@@ -89,6 +89,143 @@ func TestControllerCreatesFunctionUploadsArtifactAndAdmitsVersion(t *testing.T) 
 	}
 }
 
+func TestControllerPublishesReadyVersionAsSingleTargetRoute(t *testing.T) {
+	t.Parallel()
+	controller, _ := newControllerHarness(t, []validatorStep{{report: acceptedReport}})
+	artifactBytes := []byte{0x10, 0x11, 0x12}
+	artifactDigest := digest.Sum(artifactBytes)
+	if _, err := controller.PutArtifact(context.Background(), artifactDigest, bytes.NewReader(artifactBytes)); err != nil {
+		t.Fatalf("PutArtifact() error = %v", err)
+	}
+	function := createTestFunction(t, controller, "publish")
+	admission, err := controller.CreateVersion(context.Background(), testVersionInput(function.ID, artifactDigest))
+	if err != nil {
+		t.Fatalf("CreateVersion() error = %v", err)
+	}
+
+	route, updatedFunction, err := controller.PublishRoute(context.Background(), PublishRouteInput{
+		FunctionID:                  function.ID,
+		VersionID:                   admission.Version.VersionID,
+		ExpectedActiveRouteRevision: 0,
+	})
+	if err != nil {
+		t.Fatalf("PublishRoute() error = %v", err)
+	}
+	if route.RouteRevision != 1 || !route.Enabled || len(route.Targets) != 1 ||
+		route.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints {
+		t.Fatalf("PublishRoute() route = %+v, want enabled single target", route)
+	}
+	if route.Targets[0].VersionID != admission.Version.VersionID ||
+		route.Targets[0].AdmissionEpoch != admission.Version.AdmissionEpoch ||
+		route.Targets[0].DeploymentGeneration != admission.Deployment.Generation ||
+		route.Targets[0].EffectivePolicyDigest != admission.Deployment.EffectivePolicyDigest {
+		t.Fatalf("PublishRoute() target = %+v, want immutable ready identity", route.Targets[0])
+	}
+	if len(route.Salt) != routeSaltBytes || updatedFunction.ActiveRouteRevision != 1 ||
+		updatedFunction.ResourceRevision != function.ResourceRevision+1 {
+		t.Fatalf("PublishRoute() = (%+v, %+v), want route pointer advance", route, updatedFunction)
+	}
+	stored, err := controller.GetRoute(context.Background(), function.ID)
+	if err != nil {
+		t.Fatalf("GetRoute() error = %v", err)
+	}
+	route.Targets[0].WeightBasisPoints = 1
+	route.Salt[0] ^= 0xff
+	if stored.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints || stored.Salt[0] == route.Salt[0] {
+		t.Fatalf("GetRoute() exposed route storage: %+v", stored)
+	}
+}
+
+func TestControllerRejectsNonReadyAndCrossFunctionRouteTarget(t *testing.T) {
+	t.Parallel()
+	controller, _ := newControllerHarness(t, []validatorStep{
+		{err: validator.ErrProcessFailed},
+		{report: acceptedReport},
+	})
+	artifactBytes := []byte{0x13, 0x14, 0x15}
+	artifactDigest := digest.Sum(artifactBytes)
+	if _, err := controller.PutArtifact(context.Background(), artifactDigest, bytes.NewReader(artifactBytes)); err != nil {
+		t.Fatalf("PutArtifact() error = %v", err)
+	}
+	first := createTestFunction(t, controller, "first-route")
+	second := createTestFunction(t, controller, "second-route")
+	pending, err := controller.CreateVersion(context.Background(), testVersionInput(first.ID, artifactDigest))
+	if !errors.Is(err, validator.ErrProcessFailed) || pending.Version.State != model.VersionValidating {
+		t.Fatalf("CreateVersion() = (%+v, %v), want retryable version", pending, err)
+	}
+	_, _, err = controller.PublishRoute(context.Background(), PublishRouteInput{
+		FunctionID:                  first.ID,
+		VersionID:                   pending.Version.VersionID,
+		ExpectedActiveRouteRevision: 0,
+	})
+	assertControllerProblemCode(t, err, problem.CodeConflict)
+
+	if err := controller.ResumePendingValidation(context.Background(), 1); err != nil {
+		t.Fatalf("ResumePendingValidation() error = %v", err)
+	}
+	_, _, err = controller.PublishRoute(context.Background(), PublishRouteInput{
+		FunctionID:                  second.ID,
+		VersionID:                   pending.Version.VersionID,
+		ExpectedActiveRouteRevision: 0,
+	})
+	assertControllerProblemCode(t, err, problem.CodeConflict)
+}
+
+func TestControllerConcurrentRoutePublishUsesExactCAS(t *testing.T) {
+	t.Parallel()
+	controller, _ := newControllerHarness(t, []validatorStep{{report: acceptedReport}})
+	artifactBytes := []byte{0x16, 0x17, 0x18}
+	artifactDigest := digest.Sum(artifactBytes)
+	if _, err := controller.PutArtifact(context.Background(), artifactDigest, bytes.NewReader(artifactBytes)); err != nil {
+		t.Fatalf("PutArtifact() error = %v", err)
+	}
+	function := createTestFunction(t, controller, "concurrent-route")
+	admission, err := controller.CreateVersion(context.Background(), testVersionInput(function.ID, artifactDigest))
+	if err != nil {
+		t.Fatalf("CreateVersion() error = %v", err)
+	}
+
+	type outcome struct {
+		route model.Route
+		err   error
+	}
+	results := make(chan outcome, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			route, _, err := controller.PublishRoute(context.Background(), PublishRouteInput{
+				FunctionID:                  function.ID,
+				VersionID:                   admission.Version.VersionID,
+				ExpectedActiveRouteRevision: 0,
+			})
+			results <- outcome{route: route, err: err}
+		}()
+	}
+	group.Wait()
+	close(results)
+
+	successes := 0
+	for result := range results {
+		if result.err == nil {
+			successes++
+			if result.route.RouteRevision != 1 {
+				t.Fatalf("successful route = %+v, want revision one", result.route)
+			}
+			continue
+		}
+		assertControllerProblemCode(t, result.err, problem.CodeRevisionConflict)
+	}
+	if successes != 1 {
+		t.Fatalf("successful route publishes = %d, want 1", successes)
+	}
+	stored, err := controller.GetRoute(context.Background(), function.ID)
+	if err != nil || stored.RouteRevision != 1 {
+		t.Fatalf("GetRoute() = (%+v, %v), want one committed route", stored, err)
+	}
+}
+
 func TestControllerResumesInfrastructureFailedValidationWithSameFence(t *testing.T) {
 	t.Parallel()
 	controller, driver := newControllerHarness(t, []validatorStep{
@@ -346,6 +483,14 @@ func createTestFunction(t *testing.T, controller *Controller, name string) model
 	return result.Function
 }
 
+func assertControllerProblemCode(t *testing.T, err error, want problem.Code) {
+	t.Helper()
+	var classified *problem.Error
+	if !errors.As(err, &classified) || classified.Code != want {
+		t.Fatalf("error = %v, want problem code %q", err, want)
+	}
+}
+
 func testVersionInput(functionID string, artifactDigest digest.SHA256) CreateVersionInput {
 	return CreateVersionInput{
 		FunctionID:     functionID,
@@ -391,7 +536,8 @@ func newControllerHarness(t *testing.T, steps []validatorStep) (*Controller, *sc
 		Commands: NewMonotonicCommandSource(func() time.Time {
 			return commandTime
 		}),
-		IDs: &sequenceIDSource{},
+		IDs:   &sequenceIDSource{},
+		Salts: fixedSaltSource{salt: []byte("0123456789abcdef")},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -505,6 +651,14 @@ type scriptedIDSource struct {
 	mu sync.Mutex
 
 	ids []string
+}
+
+type fixedSaltSource struct {
+	salt []byte
+}
+
+func (s fixedSaltSource) NewSalt() ([]byte, error) {
+	return slices.Clone(s.salt), nil
 }
 
 func (s *scriptedIDSource) NewID(prefix string) (string, error) {

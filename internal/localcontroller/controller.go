@@ -22,7 +22,10 @@ import (
 	validatorprotocol "github.com/yourikka/minicloud/internal/validator/protocol"
 )
 
-const randomIDBytes = 16
+const (
+	randomIDBytes  = 16
+	routeSaltBytes = 16
+)
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
@@ -59,12 +62,19 @@ type IDSource interface {
 	NewID(prefix string) (string, error)
 }
 
+// SaltSource creates the 128-bit Route salt used by the locked v1 hash
+// contract. Salt generation is outside deterministic state application.
+type SaltSource interface {
+	NewSalt() ([]byte, error)
+}
+
 // Config declares the I/O and non-deterministic Local Core dependencies.
 type Config struct {
 	Artifacts ArtifactStore
 	Validator Validator
 	Commands  CommandSource
 	IDs       IDSource
+	Salts     SaltSource
 }
 
 // Controller is the sole Local Core write entry point for the Catalog and
@@ -74,9 +84,11 @@ type Controller struct {
 	validator Validator
 	commands  CommandSource
 	ids       IDSource
+	salts     SaltSource
 
 	catalog  *controlplane.Catalog
 	releases *controlplane.ReleaseStore
+	routes   *controlplane.RouteStore
 
 	validationMu sync.Mutex
 	validating   map[string]struct{}
@@ -99,15 +111,21 @@ func New(config Config) (*Controller, error) {
 	if config.IDs == nil {
 		config.IDs = NewRandomIDSource(nil)
 	}
+	if config.Salts == nil {
+		config.Salts = NewRandomSaltSource(nil)
+	}
 
 	catalog := controlplane.NewCatalog()
+	releases := controlplane.NewReleaseStore(catalog)
 	return &Controller{
 		artifacts:  config.Artifacts,
 		validator:  config.Validator,
 		commands:   config.Commands,
 		ids:        config.IDs,
+		salts:      config.Salts,
 		catalog:    catalog,
-		releases:   controlplane.NewReleaseStore(catalog),
+		releases:   releases,
+		routes:     controlplane.NewRouteStore(catalog, releases),
 		validating: make(map[string]struct{}),
 	}, nil
 }
@@ -157,6 +175,20 @@ func (c *Controller) newID(prefix string) (string, error) {
 		return "", fmt.Errorf("generating %s id: source returned an invalid id", prefix)
 	}
 	return id, nil
+}
+
+func (c *Controller) newRouteSalt() ([]byte, error) {
+	if c == nil || c.salts == nil {
+		return nil, errors.New("local controller salt source is required")
+	}
+	salt, err := c.salts.NewSalt()
+	if err != nil {
+		return nil, fmt.Errorf("generating route salt: %w", err)
+	}
+	if len(salt) != routeSaltBytes {
+		return nil, errors.New("generating route salt: source returned an invalid length")
+	}
+	return append([]byte(nil), salt...), nil
 }
 
 func (c *Controller) claimValidation(versionID string) bool {
@@ -262,4 +294,35 @@ func (s *RandomIDSource) NewID(prefix string) (string, error) {
 		return "", fmt.Errorf("reading local id randomness: %w", err)
 	}
 	return prefix + "-" + hex.EncodeToString(bytes), nil
+}
+
+// RandomSaltSource creates 128-bit route salts from a cryptographically secure
+// byte source.
+type RandomSaltSource struct {
+	mu     sync.Mutex
+	random io.Reader
+}
+
+// NewRandomSaltSource returns a Route salt source. A nil reader uses crypto/rand.
+func NewRandomSaltSource(random io.Reader) *RandomSaltSource {
+	if random == nil {
+		random = cryptorand.Reader
+	}
+	return &RandomSaltSource{random: random}
+}
+
+// NewSalt returns one 128-bit random Route salt.
+func (s *RandomSaltSource) NewSalt() ([]byte, error) {
+	if s == nil || s.random == nil {
+		return nil, errors.New("local route salt source random reader is required")
+	}
+
+	salt := make([]byte, routeSaltBytes)
+	s.mu.Lock()
+	_, err := io.ReadFull(s.random, salt)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("reading route salt randomness: %w", err)
+	}
+	return salt, nil
 }

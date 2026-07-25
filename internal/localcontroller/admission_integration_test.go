@@ -54,7 +54,7 @@ func TestControllerAdmissionWithRealValidator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	function, err := controller.CreateFunction(context.Background(), CreateFunctionInput{
+	createdFunction, err := controller.CreateFunction(context.Background(), CreateFunctionInput{
 		Name:       "real-validator",
 		AuthPolicy: controlplane.AuthPolicyPublic,
 	})
@@ -66,12 +66,26 @@ func TestControllerAdmissionWithRealValidator(t *testing.T) {
 	if _, err := controller.PutArtifact(context.Background(), validDigest, bytes.NewReader(wasm)); err != nil {
 		t.Fatalf("PutArtifact(valid) error = %v", err)
 	}
-	ready, err := controller.CreateVersion(context.Background(), testVersionInput(function.Function.ID, validDigest))
+	ready, err := controller.CreateVersion(context.Background(), testVersionInput(createdFunction.Function.ID, validDigest))
 	if err != nil {
 		t.Fatalf("CreateVersion(valid) error = %v", err)
 	}
 	if ready.Version.State != model.VersionReady || ready.Deployment == nil {
 		t.Fatalf("CreateVersion(valid) = %+v, want ready Version and Deployment", ready)
+	}
+	route, updatedFunction, err := controller.PublishRoute(context.Background(), PublishRouteInput{
+		FunctionID:                  createdFunction.Function.ID,
+		VersionID:                   ready.Version.VersionID,
+		ExpectedActiveRouteRevision: 0,
+	})
+	if err != nil {
+		t.Fatalf("PublishRoute() error = %v", err)
+	}
+	if !route.Enabled || route.RouteRevision != 1 || len(route.Targets) != 1 ||
+		route.Targets[0].VersionID != ready.Version.VersionID ||
+		route.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints ||
+		updatedFunction.ActiveRouteRevision != 1 {
+		t.Fatalf("PublishRoute() = (%+v, %+v), want published ready target", route, updatedFunction)
 	}
 
 	invalid := append([]byte(nil), wasm...)
@@ -80,7 +94,7 @@ func TestControllerAdmissionWithRealValidator(t *testing.T) {
 	if _, err := controller.PutArtifact(context.Background(), invalidDigest, bytes.NewReader(invalid)); err != nil {
 		t.Fatalf("PutArtifact(invalid) error = %v", err)
 	}
-	failed, err := controller.CreateVersion(context.Background(), testVersionInput(function.Function.ID, invalidDigest))
+	failed, err := controller.CreateVersion(context.Background(), testVersionInput(createdFunction.Function.ID, invalidDigest))
 	if err != nil {
 		t.Fatalf("CreateVersion(invalid) error = %v", err)
 	}
