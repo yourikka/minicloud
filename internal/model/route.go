@@ -2,6 +2,7 @@ package model
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 
 	"github.com/yourikka/minicloud/internal/digest"
@@ -48,6 +49,18 @@ type Route struct {
 	Enabled        bool           `json:"enabled"`
 }
 
+// ServingRoute is the metadata-free routing projection carried by a complete
+// ServingSnapshot. It has exactly the fields required to reproduce a v1 Route
+// target decision, without pretending that the projection is persisted state.
+type ServingRoute struct {
+	FunctionID    string        `json:"function_id"`
+	RouteRevision uint64        `json:"route_revision"`
+	Targets       []RouteTarget `json:"targets"`
+	HashVersion   string        `json:"hash_version"`
+	Salt          []byte        `json:"salt"`
+	Enabled       bool          `json:"enabled"`
+}
+
 // Validate checks the full v1 Route representation. Multi-target routes are
 // structurally valid here even though Core mode applies an additional gate.
 func (r Route) Validate() error {
@@ -80,6 +93,49 @@ func (r Route) Validate() error {
 	}
 	if !idPattern.MatchString(r.SaltID) {
 		return problem.Invalid("salt_id", "must be a valid identifier")
+	}
+	if len(r.Salt) != 16 {
+		return problem.Invalid("salt", "must contain exactly 128 bits")
+	}
+	return nil
+}
+
+// ServingRoute returns a defensive projection suitable for Gateway selection.
+func (r Route) ServingRoute() ServingRoute {
+	return ServingRoute{
+		FunctionID:    r.FunctionID,
+		RouteRevision: r.RouteRevision,
+		Targets:       slices.Clone(r.Targets),
+		HashVersion:   r.HashVersion,
+		Salt:          slices.Clone(r.Salt),
+		Enabled:       r.Enabled,
+	}
+}
+
+// Validate checks the fields required to make one deterministic serving Route
+// decision. Trigger affinity selection and persisted Route metadata are
+// deliberately validated by their owning projections.
+func (r ServingRoute) Validate() error {
+	if !idPattern.MatchString(r.FunctionID) {
+		return problem.Invalid("function_id", "must be a valid identifier")
+	}
+	if r.RouteRevision == 0 {
+		return problem.Invalid("route_revision", "must be greater than zero")
+	}
+	if len(r.Targets) > MaxRouteTargets {
+		return problem.Invalid("targets", "must not contain more than 32 entries")
+	}
+	if !r.Enabled && len(r.Targets) != 0 {
+		return problem.Invalid("targets", "must be empty when the route is disabled")
+	}
+	if r.Enabled && len(r.Targets) == 0 {
+		return problem.Invalid("targets", "must not be empty when the route is enabled")
+	}
+	if err := validateRouteTargets(r.Targets); err != nil {
+		return err
+	}
+	if r.HashVersion != HashVersionSHA256BPSV1 {
+		return problem.Invalid("hash_version", "is not supported")
 	}
 	if len(r.Salt) != 16 {
 		return problem.Invalid("salt", "must contain exactly 128 bits")

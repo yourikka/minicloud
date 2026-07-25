@@ -32,6 +32,20 @@ func Select(route model.Route, affinityKey []byte) (Decision, error) {
 	if err := route.Validate(); err != nil {
 		return Decision{}, err
 	}
+	return selectServing(route.ServingRoute(), affinityKey)
+}
+
+// SelectServing validates and selects from the metadata-free Route projection
+// carried by a checked ServingSnapshot. Callers derive affinityKey from the
+// Snapshot Trigger and Route affinity fields before calling this function.
+func SelectServing(route model.ServingRoute, affinityKey []byte) (Decision, error) {
+	if err := route.Validate(); err != nil {
+		return Decision{}, err
+	}
+	return selectServing(route, affinityKey)
+}
+
+func selectServing(route model.ServingRoute, affinityKey []byte) (Decision, error) {
 	if !route.Enabled {
 		return Decision{}, &problem.Error{
 			Code:    problem.CodeFunctionDisabled,
@@ -58,7 +72,7 @@ func Select(route model.Route, affinityKey []byte) (Decision, error) {
 	return Decision{}, errors.New("routing: validated target intervals do not cover bucket")
 }
 
-func hashPreimage(route model.Route, affinityKey []byte) ([]byte, error) {
+func hashPreimage(route model.ServingRoute, affinityKey []byte) ([]byte, error) {
 	revision := make([]byte, 8)
 	binary.BigEndian.PutUint64(revision, route.RouteRevision)
 	fields := [][]byte{

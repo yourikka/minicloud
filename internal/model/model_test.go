@@ -155,6 +155,26 @@ func TestRouteValidateCore(t *testing.T) {
 	}
 }
 
+func TestServingRouteValidationAndProjectionAreDefensive(t *testing.T) {
+	t.Parallel()
+	route := validRoute()
+	serving := route.ServingRoute()
+	if err := serving.Validate(); err != nil {
+		t.Fatalf("ServingRoute.Validate() error = %v", err)
+	}
+	serving.Targets[0].WeightBasisPoints = 1
+	serving.Salt[0] ^= 0xff
+	if route.Targets[0].WeightBasisPoints != model.TotalRouteWeightBasisPoints || route.Salt[0] == serving.Salt[0] {
+		t.Fatalf("ServingRoute() exposed Route memory: %+v", route)
+	}
+
+	serving = route.ServingRoute()
+	serving.Enabled = false
+	if err := serving.Validate(); err == nil {
+		t.Fatal("ServingRoute.Validate() accepted disabled route with targets")
+	}
+}
+
 func TestDeploymentValidate(t *testing.T) {
 	t.Parallel()
 

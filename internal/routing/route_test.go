@@ -162,6 +162,32 @@ func TestSelectRejectsDisabledRoute(t *testing.T) {
 	}
 }
 
+func TestSelectServingMatchesPersistedRouteSelection(t *testing.T) {
+	t.Parallel()
+	route := testRoute("fn_serving", 12, []byte("0123456789abcdef"), []model.RouteTarget{
+		{VersionID: "ver_a", AdmissionEpoch: 1, DeploymentGeneration: 1, EffectivePolicyDigest: digest.Sum([]byte("policy-a")), WeightBasisPoints: 6_000},
+		{VersionID: "ver_b", AdmissionEpoch: 1, DeploymentGeneration: 2, EffectivePolicyDigest: digest.Sum([]byte("policy-b")), WeightBasisPoints: 4_000},
+	})
+	affinity := []byte("request-456")
+	fromRoute, err := routing.Select(route, affinity)
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	serving := route.ServingRoute()
+	fromServing, err := routing.SelectServing(serving, affinity)
+	if err != nil {
+		t.Fatalf("SelectServing() error = %v", err)
+	}
+	if fromServing != fromRoute {
+		t.Fatalf("SelectServing() = %+v, want %+v", fromServing, fromRoute)
+	}
+	serving.Targets[0].WeightBasisPoints = 1
+	serving.Salt[0] ^= 0xff
+	if route.Targets[0].WeightBasisPoints != 6_000 || route.Salt[0] == serving.Salt[0] {
+		t.Fatal("ServingRoute mutation changed persisted Route input")
+	}
+}
+
 func testRoute(functionID string, revision uint64, salt []byte, targets []model.RouteTarget) model.Route {
 	return model.Route{
 		Metadata: model.Metadata{
