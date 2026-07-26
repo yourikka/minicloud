@@ -48,9 +48,16 @@ runtime. Guest response headers may carry end-to-end application values such as
 
 Concurrency admission is a bounded non-blocking semaphore. Per-Gateway rate
 admission uses a process-local token bucket, as required by v1; it deliberately
-does not claim a global exact quota. A real HTTP server must additionally set
-TLS, `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`, and
-`MaxHeaderBytes`. Handler tests cannot substitute for those listener controls.
+does not claim a global exact quota. The Gateway HTTP Server now fixes
+`ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`,
+`MaxHeaderBytes`, and bounded graceful shutdown. Plain HTTP is accepted only on
+an explicit loopback address; every non-loopback listener requires a certificate
+and private key and uses TLS 1.2 or newer.
+
+The Server owns listener lifecycle but not certificate issuance, rotation, or
+client-facing reverse-proxy policy. The future executable composition must pass
+its signal-derived Context into `ListenAndServe` and must not replace these
+bounds with unconfigured `http.ListenAndServe` defaults.
 
 ## Remaining Evidence
 
