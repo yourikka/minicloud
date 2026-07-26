@@ -24,9 +24,18 @@ Envelope.
 This fast SHA-256 verifier is appropriate only for the specification's
 high-entropy, randomly generated Invocation Tokens. It is not a password
 storage scheme and must not be reused for human-chosen credentials. Token
-creation and rotation must continue to generate cryptographic random values and
-return plaintext only once; those management operations remain to be wired to
-the replicated catalog.
+creation and rotation use an injected cryptographic source to generate 256-bit
+URL-safe values. Local Controller returns plaintext only from the create or
+rotate result; Get, List, Catalog state, and Serving projection contain only the
+verifier digest.
+
+Rotation is a Trigger Resource Revision CAS that atomically replaces the single
+verifier. The state machine neither retains the old verifier nor creates an
+implicit overlap window. A successful commit therefore means newly built
+ServingSnapshots accept only the new token, while Gateways still serving an old
+bounded LKG snapshot accept only the old token. The rotation response proves
+the control write, not fleet-wide propagation. The replicated Management API
+and explicit propagation status remain to be implemented.
 
 ## Header and Resource Limits
 

@@ -6,6 +6,7 @@ package localcontroller
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,8 +24,9 @@ import (
 )
 
 const (
-	randomIDBytes  = 16
-	routeSaltBytes = 16
+	randomIDBytes    = 16
+	randomTokenBytes = 32
+	routeSaltBytes   = 16
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
@@ -68,6 +70,12 @@ type SaltSource interface {
 	NewSalt() ([]byte, error)
 }
 
+// TokenSource creates high-entropy Invocation Token plaintext outside
+// deterministic state application.
+type TokenSource interface {
+	NewToken() (string, error)
+}
+
 // Config declares the I/O and non-deterministic Local Core dependencies.
 type Config struct {
 	Artifacts ArtifactStore
@@ -75,6 +83,7 @@ type Config struct {
 	Commands  CommandSource
 	IDs       IDSource
 	Salts     SaltSource
+	Tokens    TokenSource
 }
 
 // Controller is the sole Local Core write entry point for the Catalog and
@@ -85,6 +94,7 @@ type Controller struct {
 	commands  CommandSource
 	ids       IDSource
 	salts     SaltSource
+	tokens    TokenSource
 
 	catalog     *controlplane.Catalog
 	releases    *controlplane.ReleaseStore
@@ -115,6 +125,9 @@ func New(config Config) (*Controller, error) {
 	if config.Salts == nil {
 		config.Salts = NewRandomSaltSource(nil)
 	}
+	if config.Tokens == nil {
+		config.Tokens = NewRandomTokenSource(nil)
+	}
 
 	catalog := controlplane.NewCatalog()
 	releases := controlplane.NewReleaseStore(catalog)
@@ -129,6 +142,7 @@ func New(config Config) (*Controller, error) {
 		commands:    config.Commands,
 		ids:         config.IDs,
 		salts:       config.Salts,
+		tokens:      config.Tokens,
 		catalog:     catalog,
 		releases:    releases,
 		routes:      routes,
@@ -332,4 +346,33 @@ func (s *RandomSaltSource) NewSalt() ([]byte, error) {
 		return nil, fmt.Errorf("reading route salt randomness: %w", err)
 	}
 	return salt, nil
+}
+
+// RandomTokenSource creates 256-bit URL-safe Invocation Tokens.
+type RandomTokenSource struct {
+	mu     sync.Mutex
+	random io.Reader
+}
+
+// NewRandomTokenSource returns a token source. A nil reader uses crypto/rand.
+func NewRandomTokenSource(random io.Reader) *RandomTokenSource {
+	if random == nil {
+		random = cryptorand.Reader
+	}
+	return &RandomTokenSource{random: random}
+}
+
+// NewToken returns one unpadded URL-safe token containing 256 random bits.
+func (s *RandomTokenSource) NewToken() (string, error) {
+	if s == nil || s.random == nil {
+		return "", errors.New("local invocation token source random reader is required")
+	}
+	random := make([]byte, randomTokenBytes)
+	s.mu.Lock()
+	_, err := io.ReadFull(s.random, random)
+	s.mu.Unlock()
+	if err != nil {
+		return "", fmt.Errorf("reading invocation token randomness: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(random), nil
 }

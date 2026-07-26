@@ -84,7 +84,8 @@ func TestCatalogLifecycleUsesExactResourceRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetFunctionLifecycle(disable) error = %v", err)
 	}
-	if disabled.Lifecycle != model.FunctionDisabled || disabled.ResourceRevision != 2 || !disabled.UpdatedAt.Equal(updatedAt) {
+	if disabled.Lifecycle != model.FunctionDisabled || disabled.ResourceRevision != 2 ||
+		!disabled.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("disabled function = %+v", disabled)
 	}
 	_, err = catalog.SetFunctionLifecycle(SetFunctionLifecycleCommand{
@@ -96,10 +97,12 @@ func TestCatalogLifecycleUsesExactResourceRevision(t *testing.T) {
 	})
 	assertCatalogProblemCode(t, err, problem.CodeRevisionConflict, "")
 	var conflict *RevisionConflict
-	if !errors.As(err, &conflict) || conflict.RevisionKind != "resource_revision" || conflict.Expected != 1 || conflict.Actual != 2 {
+	if !errors.As(err, &conflict) || conflict.RevisionKind != "resource_revision" ||
+		conflict.Expected != 1 || conflict.Actual != 2 {
 		t.Fatalf("revision conflict = %#v, want resource_revision expected=1 actual=2", conflict)
 	}
-	if details := conflict.Details(); details["revision_kind"] != "resource_revision" || details["expected_revision"] != uint64(1) || details["actual_revision"] != uint64(2) {
+	if details := conflict.Details(); details["revision_kind"] != "resource_revision" ||
+		details["expected_revision"] != uint64(1) || details["actual_revision"] != uint64(2) {
 		t.Fatalf("revision details = %#v", details)
 	}
 	got, _, err := catalog.GetFunction(create.Function.ID)
@@ -119,6 +122,83 @@ func TestCatalogLifecycleUsesExactResourceRevision(t *testing.T) {
 	if err != nil || restored.Lifecycle != model.FunctionActive || restored.ResourceRevision != 3 {
 		t.Fatalf("SetFunctionLifecycle(restore) = %+v, %v", restored, err)
 	}
+}
+
+func TestCatalogRotatesSingleInvocationTokenVerifierWithExactCAS(t *testing.T) {
+	t.Parallel()
+	catalog := NewCatalog()
+	create := validCreateFunction(1, "function-01", "echo")
+	if _, err := catalog.CreateFunction(create); err != nil {
+		t.Fatalf("CreateFunction() error = %v", err)
+	}
+	oldVerifier := *create.Trigger.TokenVerifierDigest
+	newVerifier := digest.Sum([]byte("new-high-entropy-token"))
+	updatedAt := create.Trigger.UpdatedAt.Add(time.Minute)
+	rotated, err := catalog.RotateInvocationToken(RotateInvocationTokenCommand{
+		FunctionID:               create.Function.ID,
+		ExpectedResourceRevision: 1,
+		TokenVerifierDigest:      newVerifier,
+		UpdatedAt:                updatedAt,
+		AppliedIndex:             2,
+	})
+	if err != nil {
+		t.Fatalf("RotateInvocationToken() error = %v", err)
+	}
+	if rotated.ResourceRevision != 2 || !rotated.UpdatedAt.Equal(updatedAt) ||
+		rotated.TokenVerifierDigest == nil || *rotated.TokenVerifierDigest != newVerifier {
+		t.Fatalf("RotateInvocationToken() = %+v", rotated)
+	}
+	if *rotated.TokenVerifierDigest == oldVerifier {
+		t.Fatal("RotateInvocationToken() retained the old verifier")
+	}
+	*rotated.TokenVerifierDigest = digest.Sum([]byte("mutated-result"))
+	_, stored, err := catalog.GetFunction(create.Function.ID)
+	if err != nil {
+		t.Fatalf("GetFunction() error = %v", err)
+	}
+	if stored.TokenVerifierDigest == nil || *stored.TokenVerifierDigest != newVerifier {
+		t.Fatalf("rotated result exposed catalog storage: %+v", stored)
+	}
+
+	_, err = catalog.RotateInvocationToken(RotateInvocationTokenCommand{
+		FunctionID:               create.Function.ID,
+		ExpectedResourceRevision: 1,
+		TokenVerifierDigest:      digest.Sum([]byte("stale-write")),
+		UpdatedAt:                updatedAt.Add(time.Minute),
+		AppliedIndex:             3,
+	})
+	assertCatalogProblemCode(t, err, problem.CodeRevisionConflict, "")
+	var conflict *RevisionConflict
+	if !errors.As(err, &conflict) || conflict.Expected != 1 || conflict.Actual != 2 {
+		t.Fatalf("rotation conflict = %#v", conflict)
+	}
+	_, err = catalog.RotateInvocationToken(RotateInvocationTokenCommand{
+		FunctionID:               create.Function.ID,
+		ExpectedResourceRevision: 2,
+		TokenVerifierDigest:      newVerifier,
+		UpdatedAt:                updatedAt.Add(time.Minute),
+		AppliedIndex:             3,
+	})
+	assertCatalogProblemCode(t, err, problem.CodeConflict, "")
+}
+
+func TestCatalogRejectsInvocationTokenRotationForPublicTrigger(t *testing.T) {
+	t.Parallel()
+	create := validCreateFunction(1, "function-01", "echo")
+	create.Trigger.AuthPolicy = AuthPolicyPublic
+	create.Trigger.TokenVerifierDigest = nil
+	catalog := NewCatalog()
+	if _, err := catalog.CreateFunction(create); err != nil {
+		t.Fatalf("CreateFunction() error = %v", err)
+	}
+	_, err := catalog.RotateInvocationToken(RotateInvocationTokenCommand{
+		FunctionID:               create.Function.ID,
+		ExpectedResourceRevision: 1,
+		TokenVerifierDigest:      digest.Sum([]byte("unused-token")),
+		UpdatedAt:                create.Trigger.UpdatedAt.Add(time.Minute),
+		AppliedIndex:             2,
+	})
+	assertCatalogProblemCode(t, err, problem.CodeConflict, "")
 }
 
 func TestCatalogSnapshotAndStateDigestAreStable(t *testing.T) {

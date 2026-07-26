@@ -46,7 +46,8 @@ func TestControllerCreatesFunctionUploadsArtifactAndAdmitsVersion(t *testing.T) 
 	if function.Function.Lifecycle != model.FunctionActive || !function.Trigger.Enabled {
 		t.Fatalf("CreateFunction() = %+v, want active function and enabled trigger", function)
 	}
-	if function.Trigger.FunctionID != function.Function.ID || function.Trigger.AuthPolicy != controlplane.AuthPolicyPublic {
+	if function.Trigger.FunctionID != function.Function.ID ||
+		function.Trigger.AuthPolicy != controlplane.AuthPolicyPublic {
 		t.Fatalf("CreateFunction() trigger = %+v, want public trigger for created function", function.Trigger)
 	}
 
@@ -57,11 +58,17 @@ func TestControllerCreatesFunctionUploadsArtifactAndAdmitsVersion(t *testing.T) 
 	if result.Version.State != model.VersionReady || result.Deployment == nil {
 		t.Fatalf("CreateVersion() = %+v, want ready version with deployment", result)
 	}
-	if result.Deployment.Generation != 1 || result.Deployment.DesiredReplicas != 1 || result.Deployment.ReadyReplicas != 0 {
+	if result.Deployment.Generation != 1 || result.Deployment.DesiredReplicas != 1 ||
+		result.Deployment.ReadyReplicas != 0 {
 		t.Fatalf("CreateVersion() deployment = %+v, want Local Core generation one", result.Deployment)
 	}
-	if !result.Version.CreatedAt.Before(result.Version.UpdatedAt) || result.Version.CreatedRaftIndex >= result.Deployment.CreatedRaftIndex {
-		t.Fatalf("CreateVersion() command metadata did not advance: version=%+v deployment=%+v", result.Version.Metadata, result.Deployment.Metadata)
+	if !result.Version.CreatedAt.Before(result.Version.UpdatedAt) ||
+		result.Version.CreatedRaftIndex >= result.Deployment.CreatedRaftIndex {
+		t.Fatalf(
+			"CreateVersion() command metadata did not advance: version=%+v deployment=%+v",
+			result.Version.Metadata,
+			result.Deployment.Metadata,
+		)
 	}
 
 	requests := validator.Requests()
@@ -88,6 +95,80 @@ func TestControllerCreatesFunctionUploadsArtifactAndAdmitsVersion(t *testing.T) 
 	}
 	if len(listed) != 1 || listed[0].Function.ID != function.Function.ID {
 		t.Fatalf("ListFunctions() = %+v, want created function", listed)
+	}
+}
+
+func TestControllerCreatesAndRotatesInvocationTokenWithoutPersistingPlaintext(t *testing.T) {
+	t.Parallel()
+	controller, _ := newControllerHarness(t, nil)
+	created, err := controller.CreateFunction(context.Background(), CreateFunctionInput{
+		Name: "private", AuthPolicy: controlplane.AuthPolicyToken,
+	})
+	if err != nil {
+		t.Fatalf("CreateFunction() error = %v", err)
+	}
+	if created.InvocationToken != "token-1" || created.Trigger.TokenVerifierDigest == nil ||
+		*created.Trigger.TokenVerifierDigest != digest.Sum([]byte(created.InvocationToken)) {
+		t.Fatalf("CreateFunction() token result = %+v", created)
+	}
+	stored, err := controller.GetFunction(context.Background(), created.Function.ID)
+	if err != nil {
+		t.Fatalf("GetFunction() error = %v", err)
+	}
+	if stored.InvocationToken != "" || stored.Trigger.TokenVerifierDigest == nil ||
+		*stored.Trigger.TokenVerifierDigest != *created.Trigger.TokenVerifierDigest {
+		t.Fatalf("GetFunction() token view = %+v", stored)
+	}
+	rotated, err := controller.RotateInvocationToken(context.Background(), RotateInvocationTokenInput{
+		FunctionID: created.Function.ID, ExpectedResourceRevision: created.Trigger.ResourceRevision,
+	})
+	if err != nil {
+		t.Fatalf("RotateInvocationToken() error = %v", err)
+	}
+	if rotated.InvocationToken != "token-2" || rotated.Trigger.ResourceRevision != 2 ||
+		rotated.Trigger.TokenVerifierDigest == nil ||
+		*rotated.Trigger.TokenVerifierDigest != digest.Sum([]byte(rotated.InvocationToken)) ||
+		*rotated.Trigger.TokenVerifierDigest == *created.Trigger.TokenVerifierDigest {
+		t.Fatalf("RotateInvocationToken() = %+v", rotated)
+	}
+	listed, err := controller.ListFunctions(context.Background())
+	if err != nil {
+		t.Fatalf("ListFunctions() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].InvocationToken != "" {
+		t.Fatalf("ListFunctions() exposed token plaintext: %+v", listed)
+	}
+	states, err := controller.ListServingStates(context.Background())
+	if err != nil {
+		t.Fatalf("ListServingStates() error = %v", err)
+	}
+	if len(states) != 1 || states[0].Trigger.ResourceRevision != 2 ||
+		states[0].Trigger.TokenVerifierDigest == nil ||
+		*states[0].Trigger.TokenVerifierDigest != *rotated.Trigger.TokenVerifierDigest {
+		t.Fatalf("ListServingStates() token projection = %+v", states)
+	}
+	_, err = controller.RotateInvocationToken(context.Background(), RotateInvocationTokenInput{
+		FunctionID: created.Function.ID, ExpectedResourceRevision: 1,
+	})
+	var conflict *controlplane.RevisionConflict
+	if !errors.As(err, &conflict) || conflict.Actual != 2 {
+		t.Fatalf("stale RotateInvocationToken() error = %v", err)
+	}
+}
+
+func TestRandomTokenSourceUsesFullEntropyAndFailsClosed(t *testing.T) {
+	t.Parallel()
+	random := bytes.Repeat([]byte{0xab}, randomTokenBytes)
+	source := NewRandomTokenSource(bytes.NewReader(random))
+	token, err := source.NewToken()
+	if err != nil {
+		t.Fatalf("NewToken() error = %v", err)
+	}
+	if token != "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s" {
+		t.Fatalf("NewToken() = %q", token)
+	}
+	if _, err := source.NewToken(); err == nil {
+		t.Fatal("NewToken() accepted exhausted randomness")
 	}
 }
 
@@ -354,7 +435,8 @@ func TestControllerMarksValidatorLimitAsFailedVersion(t *testing.T) {
 	if result.Version.State != model.VersionFailed || result.Deployment != nil || result.Version.ValidationError == nil {
 		t.Fatalf("CreateVersion() = %+v, want failed version without deployment", result)
 	}
-	if result.Version.ValidationError.Code != problem.CodeInvalidModule || result.Version.ValidationError.Message != "module validation exceeded the admission limit" {
+	if result.Version.ValidationError.Code != problem.CodeInvalidModule ||
+		result.Version.ValidationError.Message != "module validation exceeded the admission limit" {
 		t.Fatalf("validation error = %+v, want safe admission-limit classification", result.Version.ValidationError)
 	}
 	if err := controller.ResumePendingValidation(context.Background(), 1); err != nil {
@@ -609,8 +691,9 @@ func newControllerHarness(t *testing.T, steps []validatorStep) (*Controller, *sc
 		Commands: NewMonotonicCommandSource(func() time.Time {
 			return commandTime
 		}),
-		IDs:   &sequenceIDSource{},
-		Salts: fixedSaltSource{salt: []byte("0123456789abcdef")},
+		IDs:    &sequenceIDSource{},
+		Salts:  fixedSaltSource{salt: []byte("0123456789abcdef")},
+		Tokens: &sequenceTokenSource{},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -689,6 +772,18 @@ func acceptedReport(request validatorprotocol.Request) validatorprotocol.Report 
 type sequenceIDSource struct {
 	mu   sync.Mutex
 	next int
+}
+
+type sequenceTokenSource struct {
+	mu   sync.Mutex
+	next int
+}
+
+func (s *sequenceTokenSource) NewToken() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next++
+	return fmt.Sprintf("token-%d", s.next), nil
 }
 
 func (s *sequenceIDSource) NewID(prefix string) (string, error) {

@@ -2,6 +2,7 @@ package localcontroller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/yourikka/minicloud/internal/controlplane"
 	"github.com/yourikka/minicloud/internal/digest"
 	"github.com/yourikka/minicloud/internal/model"
+	"github.com/yourikka/minicloud/internal/problem"
 )
 
 // PutArtifact publishes one verified immutable Artifact to the CAS.
@@ -41,6 +43,10 @@ func (c *Controller) CreateFunction(ctx context.Context, input CreateFunctionInp
 	}
 	if c == nil || c.catalog == nil {
 		return FunctionView{}, fmt.Errorf("creating function: local controller catalog is required")
+	}
+	invocationToken, verifier, err := c.newInvocationToken(input.AuthPolicy)
+	if err != nil {
+		return FunctionView{}, err
 	}
 	functionID, err := c.newID("function")
 	if err != nil {
@@ -80,7 +86,7 @@ func (c *Controller) CreateFunction(ctx context.Context, input CreateFunctionInp
 		FunctionID:          functionID,
 		Enabled:             true,
 		AuthPolicy:          input.AuthPolicy,
-		TokenVerifierDigest: cloneDigest(input.TokenVerifierDigest),
+		TokenVerifierDigest: verifier,
 	}
 	if _, err := c.catalog.CreateFunction(controlplane.CreateFunctionCommand{
 		IfNoneMatch:  true,
@@ -94,7 +100,49 @@ func (c *Controller) CreateFunction(ctx context.Context, input CreateFunctionInp
 	if err != nil {
 		return FunctionView{}, fmt.Errorf("loading created function: %w", err)
 	}
-	return FunctionView{Function: function, Trigger: trigger}, nil
+	return FunctionView{
+		Function: function, Trigger: trigger, InvocationToken: invocationToken,
+	}, nil
+}
+
+// RotateInvocationToken replaces the single verifier and returns plaintext
+// exactly once in this response value.
+func (c *Controller) RotateInvocationToken(
+	ctx context.Context,
+	input RotateInvocationTokenInput,
+) (FunctionView, error) {
+	if err := checkContext(ctx); err != nil {
+		return FunctionView{}, err
+	}
+	if c == nil || c.catalog == nil || c.tokens == nil {
+		return FunctionView{}, fmt.Errorf("rotating invocation token: local controller dependencies are required")
+	}
+	token, err := c.tokens.NewToken()
+	if err != nil {
+		return FunctionView{}, fmt.Errorf("generating invocation token: %w", err)
+	}
+	if token == "" {
+		return FunctionView{}, errors.New("generating invocation token: token source returned an empty token")
+	}
+	command, err := c.nextCommand()
+	if err != nil {
+		return FunctionView{}, err
+	}
+	trigger, err := c.catalog.RotateInvocationToken(controlplane.RotateInvocationTokenCommand{
+		FunctionID:               input.FunctionID,
+		ExpectedResourceRevision: input.ExpectedResourceRevision,
+		TokenVerifierDigest:      digest.Sum([]byte(token)),
+		UpdatedAt:                command.At,
+		AppliedIndex:             command.AppliedIndex,
+	})
+	if err != nil {
+		return FunctionView{}, fmt.Errorf("rotating invocation token: %w", err)
+	}
+	function, _, err := c.catalog.GetFunction(input.FunctionID)
+	if err != nil {
+		return FunctionView{}, fmt.Errorf("loading rotated invocation token: %w", err)
+	}
+	return FunctionView{Function: function, Trigger: trigger, InvocationToken: token}, nil
 }
 
 // GetFunction returns one Function and its default HTTP Trigger.
@@ -175,10 +223,26 @@ func cloneLabels(labels map[string]string) map[string]string {
 	return cloned
 }
 
-func cloneDigest(value *digest.SHA256) *digest.SHA256 {
-	if value == nil {
-		return nil
+func (c *Controller) newInvocationToken(
+	policy controlplane.AuthPolicy,
+) (string, *digest.SHA256, error) {
+	switch policy {
+	case controlplane.AuthPolicyPublic:
+		return "", nil, nil
+	case controlplane.AuthPolicyToken:
+		if c.tokens == nil {
+			return "", nil, errors.New("creating function: invocation token source is required")
+		}
+		token, err := c.tokens.NewToken()
+		if err != nil {
+			return "", nil, fmt.Errorf("generating invocation token: %w", err)
+		}
+		if token == "" {
+			return "", nil, errors.New("generating invocation token: token source returned an empty token")
+		}
+		verifier := digest.Sum([]byte(token))
+		return token, &verifier, nil
+	default:
+		return "", nil, problem.Invalid("auth_policy", "must be token or public")
 	}
-	cloned := *value
-	return &cloned
 }

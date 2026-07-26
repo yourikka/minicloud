@@ -10,16 +10,23 @@ import (
 // CreateFunctionInput contains the caller-controlled Function fields. The
 // controller generates persistent IDs, timestamps, revisions, and index.
 type CreateFunctionInput struct {
-	Name                string
-	Labels              map[string]string
-	AuthPolicy          controlplane.AuthPolicy
-	TokenVerifierDigest *digest.SHA256
+	Name       string
+	Labels     map[string]string
+	AuthPolicy controlplane.AuthPolicy
 }
 
 // FunctionView is one Function with its mandatory default HTTP Trigger.
+// InvocationToken is populated only by create and rotate responses.
 type FunctionView struct {
-	Function model.Function
-	Trigger  controlplane.HTTPTrigger
+	Function        model.Function           `json:"function"`
+	Trigger         controlplane.HTTPTrigger `json:"http_trigger"`
+	InvocationToken string                   `json:"invocation_token,omitempty"`
+}
+
+// RotateInvocationTokenInput applies an exact Trigger resource-revision CAS.
+type RotateInvocationTokenInput struct {
+	FunctionID               string
+	ExpectedResourceRevision uint64
 }
 
 // SetFunctionLifecycleInput applies an exact Function resource-revision CAS.

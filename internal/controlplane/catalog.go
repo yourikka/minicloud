@@ -76,6 +76,16 @@ type CreateFunctionCommand struct {
 	Trigger      HTTPTrigger    `json:"trigger"`
 }
 
+// RotateInvocationTokenCommand atomically replaces the only accepted verifier
+// for a token-authenticated default HTTP Trigger.
+type RotateInvocationTokenCommand struct {
+	FunctionID               string        `json:"function_id"`
+	ExpectedResourceRevision uint64        `json:"expected_resource_revision"`
+	TokenVerifierDigest      digest.SHA256 `json:"token_verifier_digest"`
+	UpdatedAt                time.Time     `json:"updated_at"`
+	AppliedIndex             uint64        `json:"applied_index"`
+}
+
 // SetFunctionLifecycleCommand conditionally changes only the Function desired
 // lifecycle. It intentionally does not update the Trigger or Route.
 type SetFunctionLifecycleCommand struct {
@@ -199,7 +209,11 @@ func (c *Catalog) SetFunctionLifecycle(command SetFunctionLifecycleCommand) (mod
 		return model.Function{}, classified(problem.CodeNotFound, "function was not found")
 	}
 	if function.ResourceRevision != command.ExpectedResourceRevision {
-		return model.Function{}, revisionConflict("resource_revision", command.ExpectedResourceRevision, function.ResourceRevision)
+		return model.Function{}, revisionConflict(
+			"resource_revision",
+			command.ExpectedResourceRevision,
+			function.ResourceRevision,
+		)
 	}
 	if function.Lifecycle != model.FunctionActive && function.Lifecycle != model.FunctionDisabled {
 		return model.Function{}, classified(problem.CodeConflict, "function lifecycle cannot be changed in its current state")
@@ -215,6 +229,48 @@ func (c *Catalog) SetFunctionLifecycle(command SetFunctionLifecycleCommand) (mod
 	}
 	c.functionsByID[function.ID] = function
 	return cloneFunction(function), nil
+}
+
+// RotateInvocationToken applies a single-verifier CAS without retaining token
+// plaintext or an overlap verifier.
+func (c *Catalog) RotateInvocationToken(command RotateInvocationTokenCommand) (HTTPTrigger, error) {
+	if c == nil {
+		return HTTPTrigger{}, errors.New("control-plane catalog is nil")
+	}
+	if err := validateRotateInvocationToken(command); err != nil {
+		return HTTPTrigger{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	triggerID, exists := c.triggerIDByFunc[command.FunctionID]
+	if !exists {
+		return HTTPTrigger{}, classified(problem.CodeNotFound, "function was not found")
+	}
+	trigger, exists := c.triggersByID[triggerID]
+	if !exists {
+		return HTTPTrigger{}, errors.New("catalog invariant: function has no default HTTP trigger")
+	}
+	if trigger.ResourceRevision != command.ExpectedResourceRevision {
+		return HTTPTrigger{}, revisionConflict(
+			"resource_revision",
+			command.ExpectedResourceRevision,
+			trigger.ResourceRevision,
+		)
+	}
+	if trigger.AuthPolicy != AuthPolicyToken {
+		return HTTPTrigger{}, classified(problem.CodeConflict, "public HTTP trigger has no invocation token")
+	}
+	if trigger.TokenVerifierDigest != nil && *trigger.TokenVerifierDigest == command.TokenVerifierDigest {
+		return HTTPTrigger{}, classified(problem.CodeConflict, "invocation token verifier did not change")
+	}
+	trigger.TokenVerifierDigest = cloneDigestValue(command.TokenVerifierDigest)
+	trigger.UpdatedAt = command.UpdatedAt.Round(0)
+	trigger.ResourceRevision++
+	if err := trigger.Validate(); err != nil {
+		return HTTPTrigger{}, fmt.Errorf("validating rotated HTTP trigger: %w", err)
+	}
+	c.triggersByID[triggerID] = trigger
+	return cloneHTTPTrigger(trigger), nil
 }
 
 // GetFunction returns a Function and its default HTTP Trigger by immutable ID.
@@ -308,7 +364,8 @@ func validateCreateFunction(command CreateFunctionCommand) error {
 		return problem.Invalid("trigger", "must be enabled and belong to the created function")
 	}
 	if command.Trigger.CreatedRaftIndex != command.AppliedIndex || command.Trigger.ResourceRevision != 1 ||
-		!command.Trigger.CreatedAt.Equal(command.Function.CreatedAt) || !command.Trigger.UpdatedAt.Equal(command.Function.UpdatedAt) {
+		!command.Trigger.CreatedAt.Equal(command.Function.CreatedAt) ||
+		!command.Trigger.UpdatedAt.Equal(command.Function.UpdatedAt) {
 		return problem.Invalid("trigger", "must share the creation command and timestamp with its function")
 	}
 	return nil
@@ -323,6 +380,25 @@ func validateLifecycleCommand(command SetFunctionLifecycleCommand) error {
 	}
 	if command.Lifecycle != model.FunctionActive && command.Lifecycle != model.FunctionDisabled {
 		return problem.Invalid("lifecycle", "must be Active or Disabled")
+	}
+	if err := validateUTC("updated_at", command.UpdatedAt); err != nil {
+		return err
+	}
+	if command.AppliedIndex == 0 {
+		return problem.Invalid("applied_index", "must be greater than zero")
+	}
+	return nil
+}
+
+func validateRotateInvocationToken(command RotateInvocationTokenCommand) error {
+	if !identifierPattern.MatchString(command.FunctionID) {
+		return problem.Invalid("function_id", "must be a valid identifier")
+	}
+	if command.ExpectedResourceRevision == 0 {
+		return problem.Invalid("expected_resource_revision", "must be greater than zero")
+	}
+	if _, err := digest.ParseSHA256(command.TokenVerifierDigest.String()); err != nil {
+		return problem.Invalid("token_verifier_digest", "must be a lowercase SHA-256 digest")
 	}
 	if err := validateUTC("updated_at", command.UpdatedAt); err != nil {
 		return err
@@ -360,6 +436,11 @@ func cloneHTTPTrigger(trigger HTTPTrigger) HTTPTrigger {
 		trigger.TokenVerifierDigest = &value
 	}
 	return trigger
+}
+
+func cloneDigestValue(value digest.SHA256) *digest.SHA256 {
+	cloned := value
+	return &cloned
 }
 
 func mapsClone(source map[string]string) map[string]string {
@@ -453,7 +534,8 @@ func canonicalCatalog(snapshot CatalogSnapshot) canonicalCatalogState {
 			ID: trigger.ID, Namespace: trigger.Namespace,
 			CreatedAt: trigger.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: trigger.UpdatedAt.Format(time.RFC3339Nano),
 			CreatedRaftIndex: trigger.CreatedRaftIndex, ResourceRevision: trigger.ResourceRevision,
-			FunctionID: trigger.FunctionID, Enabled: trigger.Enabled, AuthPolicy: trigger.AuthPolicy, TokenVerifierDigest: verifier,
+			FunctionID: trigger.FunctionID, Enabled: trigger.Enabled,
+			AuthPolicy: trigger.AuthPolicy, TokenVerifierDigest: verifier,
 		})
 	}
 	return state
