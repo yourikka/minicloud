@@ -84,3 +84,19 @@ Inventory observations and requires the authorization's Worker session and the
 Ready replica identity to match exactly. A stale registry entry therefore cannot
 be published after a session transition or replica-state change, even before the
 next reconciliation pass removes it.
+
+## In-Process End-to-End Evidence
+
+The Local Core integration test compiles the standard Go/WASI fixture and wires
+the real Artifact Store, compiled Cache, Worker Agent, Reconciler, Discovery
+Publisher, Gateway Store, local Resolver, and Gateway invocation coordinator.
+This proves the same complete Assignment fence that authorizes a Ready replica
+is published as an Endpoint and reaches the Guest. After committed cancellation,
+the reconciler removes the candidate before stopping the replica; a subsequent
+Full Sync publishes no Endpoint and Gateway invocation fails closed.
+
+This is protocol-equivalent local composition evidence, not network RPC
+evidence. It deliberately does not claim mTLS peer identity, version negotiation,
+wire serialization bounds, retry behavior, or Raft commit authority. Those
+remain separate integration layers so an in-process adapter cannot accidentally
+stand in for a security or consensus boundary.
