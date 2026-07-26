@@ -41,3 +41,19 @@ Gateway adapter must verify a presented management-independent trigger token
 before Route selection or Worker invocation. A direct local call must not
 bypass this boundary. Public and token Trigger behavior require separate
 end-to-end tests.
+
+## Full Sync Publication Ownership
+
+Local serving publication must freeze the Function, Trigger, and Route
+projection before consulting a Worker candidate source. Candidate collection
+is allowed to lag or fail, but it cannot alter the control-plane half of the
+snapshot; the Builder then excludes any candidate whose complete fence does
+not match that fixed projection.
+
+One Synchronizer serializes every Full Sync built by its Publisher and applied
+to its Gateway Store. Those Publisher and Store instances must not have a
+second writer. `Publisher.BuildFull` consumes a Sequence before Store apply, so
+an apply failure may leave a skipped Sequence; the next recovery publication
+must be another Full Sync, never a replay at the consumed position with changed
+content. Full Sync accepts a forward Sequence jump and atomically replaces the
+entire Function set, preserving fail-closed behavior during recovery.
