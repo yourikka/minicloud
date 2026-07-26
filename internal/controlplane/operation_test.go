@@ -382,6 +382,57 @@ func TestLedgerConcurrentSameOperationAppliesExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestLedgerCompleteAfterAppliesMutationExactlyOnce(t *testing.T) {
+	t.Parallel()
+	ledger := newTestLedger(t)
+	completion := validCompletion()
+	applyCalls := 0
+	apply := func() error {
+		applyCalls++
+		return nil
+	}
+	first, err := ledger.CompleteAfter(completion, apply)
+	if err != nil {
+		t.Fatalf("CompleteAfter() error = %v", err)
+	}
+	replay, err := ledger.CompleteAfter(completion, apply)
+	if err != nil {
+		t.Fatalf("CompleteAfter(replay) error = %v", err)
+	}
+	if first.Disposition != CompletionApplied || replay.Disposition != CompletionReplay || applyCalls != 1 {
+		t.Fatalf("dispositions = (%q, %q), apply calls = %d", first.Disposition, replay.Disposition, applyCalls)
+	}
+}
+
+func TestLedgerCompleteAfterPreflightsCapacityAndRetainsApplyFailure(t *testing.T) {
+	t.Parallel()
+	ledger := newTestLedgerWithConfig(t, ledgerConfig{
+		MaxOperations: 1, OperationTTL: DefaultOperationTTL, TombstoneTTL: DefaultOperationTombstoneTTL,
+	})
+	applyErr := errors.New("resource apply failed")
+	completion := validCompletion()
+	if _, err := ledger.CompleteAfter(completion, func() error { return applyErr }); !errors.Is(err, applyErr) {
+		t.Fatalf("CompleteAfter(apply failure) error = %v", err)
+	}
+	if status := ledger.Status(); status.Records != 0 {
+		t.Fatalf("Status() after apply failure = %+v", status)
+	}
+	if _, err := ledger.Complete(completion); err != nil {
+		t.Fatalf("Complete() after apply failure error = %v", err)
+	}
+	second := validCompletion()
+	second.Key.OperationID = "operation-02"
+	called := false
+	_, err := ledger.CompleteAfter(second, func() error {
+		called = true
+		return nil
+	})
+	assertProblemCodeAndField(t, err, problem.CodeOverloaded, "")
+	if called {
+		t.Fatal("CompleteAfter() called resource mutation after capacity rejection")
+	}
+}
+
 func TestLedgerSnapshotDefensivelyCopiesOutcome(t *testing.T) {
 	t.Parallel()
 	ledger := newTestLedger(t)

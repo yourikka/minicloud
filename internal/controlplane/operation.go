@@ -263,6 +263,27 @@ func (r Request) Digest() (digest.SHA256, error) {
 // for the same completed request. Callers must invoke it in the same future
 // FSM transaction as the associated resource mutation.
 func (l *Ledger) Complete(completion Completion) (CompletionResult, error) {
+	return l.complete(completion, nil)
+}
+
+// CompleteAfter validates replay, request digest, terminal outcome, and
+// capacity before applying one deterministic authoritative resource mutation.
+// The callback must not perform I/O or call this Ledger. A callback failure is
+// returned without inserting an operation record.
+func (l *Ledger) CompleteAfter(
+	completion Completion,
+	apply func() error,
+) (CompletionResult, error) {
+	if apply == nil {
+		return CompletionResult{}, errors.New("control-plane operation apply callback is required")
+	}
+	return l.complete(completion, apply)
+}
+
+func (l *Ledger) complete(
+	completion Completion,
+	apply func() error,
+) (CompletionResult, error) {
 	if l == nil {
 		return CompletionResult{}, errors.New("control-plane operation ledger is nil")
 	}
@@ -270,23 +291,14 @@ func (l *Ledger) Complete(completion Completion) (CompletionResult, error) {
 		return CompletionResult{}, err
 	}
 	key := makeOperationKey(completion.Key)
-	// Tombstones have precedence over any caller-supplied retry material: an
-	// Operation ID remains expired until a committed GC command removes it.
 	l.mu.Lock()
-	_, tombstoned := l.tombstones[key]
-	l.mu.Unlock()
-	if tombstoned {
+	defer l.mu.Unlock()
+	if _, exists := l.tombstones[key]; exists {
 		return CompletionResult{}, classified(problem.CodeOperationExpired, "operation id is retained as an expired tombstone")
 	}
 	digestValue, err := completion.Request.Digest()
 	if err != nil {
 		return CompletionResult{}, err
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if _, exists := l.tombstones[key]; exists {
-		return CompletionResult{}, classified(problem.CodeOperationExpired, "operation id is retained as an expired tombstone")
 	}
 	if current, exists := l.records[key]; exists {
 		if current.Digest != digestValue {
@@ -310,6 +322,11 @@ func (l *Ledger) Complete(completion Completion) (CompletionResult, error) {
 	}
 	if len(l.records)+len(l.tombstones) >= l.maxOperations {
 		return CompletionResult{}, classified(problem.CodeOverloaded, "control-plane operation ledger is full")
+	}
+	if apply != nil {
+		if err := apply(); err != nil {
+			return CompletionResult{}, err
+		}
 	}
 	record := Record{
 		Key:          completion.Key,
