@@ -21,8 +21,9 @@ type StateSource interface {
 	ListServingStates(context.Context) ([]controlplane.ServingState, error)
 }
 
-// CandidateSource returns current Worker candidates for one aggregate state.
-// Implementations must bind any Authorization to the supplied Discovery Epoch.
+// CandidateSource observes current Worker candidates for one aggregate state.
+// It must not Prepare, authorize, or cancel Replicas during this read, and must
+// bind any observed Authorization to the supplied Discovery Epoch.
 type CandidateSource interface {
 	Candidates(context.Context, controlplane.ServingState, uint64) ([]discovery.EndpointCandidate, error)
 }

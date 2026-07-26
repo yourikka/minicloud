@@ -57,3 +57,13 @@ an apply failure may leave a skipped Sequence; the next recovery publication
 must be another Full Sync, never a replay at the consumed position with changed
 content. Full Sync accepts a forward Sequence jump and atomically replaces the
 entire Function set, preserving fail-closed behavior during recovery.
+
+Worker reconciliation is a separate phase from candidate observation. A
+`CandidateSource` must only read committed Assignment intent, Worker inventory,
+and installed Authorization; it must not call Prepare, InstallAuthorization, or
+Cancel while a serving batch is being built. Combining those side effects with
+snapshot construction would require a Begin/Commit/Abort protocol: a failed
+Store apply must roll back newly prepared Replicas, while obsolete Replicas can
+only be canceled after the replacement view is committed. Keeping observation
+read-only avoids that cross-component transaction and leaves Replica cleanup to
+the independently retryable Worker reconciler.
