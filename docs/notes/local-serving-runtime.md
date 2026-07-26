@@ -67,3 +67,20 @@ Store apply must roll back newly prepared Replicas, while obsolete Replicas can
 only be canceled after the replacement view is committed. Keeping observation
 read-only avoids that cross-component transaction and leaves Replica cleanup to
 the independently retryable Worker reconciler.
+
+## Worker Reconciliation and Candidate Observation
+
+The Local Worker Reconciler serializes control operations for one Worker
+session. It reads committed Assignment intent first, joins an existing
+non-terminal preparation when necessary, and installs a live-only serving
+authorization only after the exact replica identity is Ready. A Cancelled intent
+is removed from the candidate registry before the Agent is asked to stop it;
+terminal acknowledgement happens only after terminal state is observed.
+
+Candidate observation uses a separate read lock that protects only the bounded
+registry of successfully installed authorizations. No lock is held while calling
+Assignment, Worker, or Agent interfaces. Each read obtains fresh Worker and
+Inventory observations and requires the authorization's Worker session and the
+Ready replica identity to match exactly. A stale registry entry therefore cannot
+be published after a session transition or replica-state change, even before the
+next reconciliation pass removes it.
