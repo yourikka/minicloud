@@ -47,14 +47,19 @@ boundary described in `local-core-management-operation-atomicity.md`. Only then
 may an HTTP management adapter create resources, install the fixed local Worker
 Assignment, trigger `Converge`, and claim a usable end-to-end Local Core process.
 
-## Remaining Process Evidence
+## Process Evidence
 
 Current tests use a real TCP listener and the production Registry, Engine,
 Cache, Agent, serving projection, Gateway, and HTTP server. They prove initial
 empty synchronization, Problem response behavior, cancellation-driven graceful
 shutdown, running/closed lifecycle fences, and idempotent final close.
 
-The command entry point and a subprocess test still need to prove signal
-handling and executable configuration. A valid Wasm upload-to-invocation
-subprocess test remains blocked on the management operation boundary rather than
-being replaced with a privileged startup shortcut.
+The `cmd/minicloud` entry point accepts bounded flag/environment configuration,
+uses `signal.NotifyContext` for SIGINT and SIGTERM, and performs final cleanup
+with a fresh bounded context. Its integration test builds both production
+binaries, starts the Local Core subprocess on a real TCP listener, verifies the
+standard empty-view response, sends SIGINT, and requires a clean exit.
+
+A valid Wasm upload-to-invocation subprocess test remains blocked on the
+management operation boundary rather than being replaced with a privileged
+startup shortcut.

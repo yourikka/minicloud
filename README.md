@@ -6,18 +6,15 @@ normative product and acceptance requirements are defined in
 
 The implementation is being delivered in the specification's M0 to M3 order.
 The repository currently contains the protocol and deterministic-domain
-foundation, the `wasi-command-v1` schemas and Go SDK, the Local Profile
-artifact CAS, and a one-shot wazero admission validator with a parent-process
-watchdog. A Worker-side WASI Command execution core now provides fresh guest
-instances, strict ABI I/O, deadlines, bounded logs/output, and default-deny host
-resources. Its verified loader coalesces cold loads and owns a bounded,
-lease-pinned compiled LRU cache. A boot-local Serving Authorization gate fences
-old Worker sessions and Leader epochs before synchronous work starts. A Worker
-Agent now binds those pieces into policy-verified Ready Replicas and performs
-post-queue, pre-instantiation authorization for synchronous calls. A pure
-`sha256-bps-v1` Route selector provides fixed-vector weighted Target decisions
-without mutating snapshots. It does not yet claim a runnable `v0.1-core`
-cluster.
+foundation, the `wasi-command-v1` schemas and Go SDK, and a runnable Local Core
+process composition. The process owns the Artifact Store, isolated Validator,
+wazero Engine, compiled Cache, Worker Agent and Registry, serving projection,
+Gateway, and hardened HTTP listener. It starts with an authoritative empty
+serving view and shuts down cleanly on SIGINT or SIGTERM.
+
+This is not yet a complete `v0.1-core` cluster. The authenticated, idempotent
+management HTTP boundary remains under construction, so the process cannot yet
+create a Function or upload and publish a Version through an external API.
 
 ## Development
 
@@ -34,3 +31,34 @@ make build
 
 Requirement coverage is tracked in `coverage/requirements.json` and checked
 against the specification with `make coverage-check`.
+
+## Run The Local Core
+
+Build both the parent process and its disposable validation child:
+
+```sh
+mkdir -p bin
+go build -trimpath -o bin/minicloud ./cmd/minicloud
+go build -trimpath -o bin/minicloud-validator ./cmd/minicloud-validator
+```
+
+Start the loopback-only default HTTP listener:
+
+```sh
+./bin/minicloud \
+  -data-dir .minicloud \
+  -validator ./bin/minicloud-validator \
+  -listen 127.0.0.1:8080
+```
+
+The current empty serving view is observable through the invocation boundary:
+
+```sh
+curl -i http://127.0.0.1:8080/invoke/missing/
+```
+
+It returns a standard `not_found` Problem response. External listen addresses
+require both `-tls-cert` and `-tls-key`. Equivalent configuration can be set
+with `MINICLOUD_DATA_DIR`, `MINICLOUD_VALIDATOR`, `MINICLOUD_LISTEN`,
+`MINICLOUD_TLS_CERT`, `MINICLOUD_TLS_KEY`, and `MINICLOUD_SYNC_INTERVAL`; flags
+take precedence.
