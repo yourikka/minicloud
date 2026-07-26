@@ -6,4 +6,5 @@ require (
 	github.com/gowebpki/jcs v1.0.1
 	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/time v0.12.0
 )

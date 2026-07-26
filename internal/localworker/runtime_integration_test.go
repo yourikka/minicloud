@@ -5,7 +5,9 @@ package localworker
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"github.com/yourikka/minicloud/internal/digest"
 	"github.com/yourikka/minicloud/internal/discovery"
 	"github.com/yourikka/minicloud/internal/gatewaydiscovery"
+	"github.com/yourikka/minicloud/internal/gatewayhttp"
 	"github.com/yourikka/minicloud/internal/gatewayinvoke"
 	"github.com/yourikka/minicloud/internal/localserving"
 	"github.com/yourikka/minicloud/internal/model"
@@ -26,7 +29,6 @@ import (
 	"github.com/yourikka/minicloud/internal/wasmexec"
 	"github.com/yourikka/minicloud/internal/workeragent"
 	"github.com/yourikka/minicloud/internal/workercache"
-	abi "github.com/yourikka/minicloud/sdk/go/minicloudabi"
 )
 
 func TestLocalRuntimeReconcilesPublishesAndInvokesRealWorker(t *testing.T) {
@@ -107,6 +109,12 @@ func TestLocalRuntimeReconcilesPublishesAndInvokesRealWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gatewayinvoke.New() error = %v", err)
 	}
+	handler, err := gatewayhttp.New(gatewayhttp.Config{
+		Discovery: discoveryStore, Gateway: gateway, Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("gatewayhttp.New() error = %v", err)
+	}
 
 	if err := reconciler.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -114,20 +122,29 @@ func TestLocalRuntimeReconcilesPublishesAndInvokesRealWorker(t *testing.T) {
 	if err := synchronizer.FullSync(t.Context()); err != nil {
 		t.Fatalf("FullSync() error = %v", err)
 	}
-	result, err := gateway.Invoke(t.Context(), gatewayinvoke.Request{
-		FunctionID:  state.Function.ID,
-		AffinityKey: []byte("request-a"),
-		Invocation:  localABIRequest("inv-local-runtime", []byte("local-runtime")),
-		Timeout:     2 * time.Second,
-	})
+	view, err := discoveryStore.Lookup(state.Function.ID)
 	if err != nil {
-		t.Fatalf("Gateway.Invoke() error = %v", err)
+		t.Fatalf("Lookup() error = %v", err)
 	}
-	fields := strings.Split(string(result.Execution.Response.Body), "|")
-	if result.DiscoveryEpoch != connection.DiscoveryEpoch || result.VersionID != state.Version.VersionID ||
-		result.Endpoint.Assignment != assignment.Identity() ||
+	if view.Snapshot.DiscoveryEpoch != connection.DiscoveryEpoch || len(view.Endpoints) != 1 ||
+		view.Endpoints[0].Assignment != assignment.Identity() {
+		t.Fatalf("published serving view = %+v", view)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/invoke/function-a/invoke",
+		bytes.NewReader([]byte("local-runtime")),
+	)
+	request.Header.Set("X-Request-ID", "req-local-runtime")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	fields := strings.Split(response.Body.String(), "|")
+	if response.Code != http.StatusOK ||
+		response.Header().Get("X-Minicloud-Invocation-ID") == "" ||
+		response.Header().Get("X-Minicloud-Version-ID") != state.Version.VersionID ||
+		response.Header().Get("X-Minicloud-Route-Revision") != "1" ||
 		len(fields) != 6 || fields[0] != "1" || fields[5] != "local-runtime" {
-		t.Fatalf("Gateway.Invoke() result = %+v, response = %q", result, result.Execution.Response.Body)
+		t.Fatalf("HTTP response status = %d, headers = %+v, body = %q", response.Code, response.Header(), response.Body)
 	}
 
 	assignment.DesiredState = controlplane.AssignmentCancelled
@@ -139,15 +156,15 @@ func TestLocalRuntimeReconcilesPublishesAndInvokesRealWorker(t *testing.T) {
 	if err := synchronizer.FullSync(t.Context()); err != nil {
 		t.Fatalf("cancel FullSync() error = %v", err)
 	}
-	_, err = gateway.Invoke(t.Context(), gatewayinvoke.Request{
-		FunctionID:  state.Function.ID,
-		AffinityKey: []byte("request-b"),
-		Invocation:  localABIRequest("inv-local-runtime-cancelled", []byte("blocked")),
-		Timeout:     2 * time.Second,
-	})
-	var invocationProblem *problem.Error
-	if !errors.As(err, &invocationProblem) || invocationProblem.Code != problem.CodeNoReadyReplica {
-		t.Fatalf("cancelled Gateway.Invoke() error = %v, want no_ready_replica", err)
+	cancelledRequest := httptest.NewRequest(http.MethodPost, "/invoke/function-a/invoke", strings.NewReader("blocked"))
+	cancelledResponse := httptest.NewRecorder()
+	handler.ServeHTTP(cancelledResponse, cancelledRequest)
+	var envelope problem.Envelope
+	if err := json.Unmarshal(cancelledResponse.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decoding cancelled response: %v", err)
+	}
+	if cancelledResponse.Code != http.StatusServiceUnavailable || envelope.Error.Code != problem.CodeNoReadyReplica {
+		t.Fatalf("cancelled HTTP response status = %d, envelope = %+v", cancelledResponse.Code, envelope)
 	}
 }
 
@@ -214,15 +231,6 @@ func localRuntimeState(
 	assignment.Placement.MemoryMiB = state.Deployment.ResourceLimits.MemoryMiB
 	assignment.Placement.PolicyDigest = policyDigest
 	return state, assignment
-}
-
-func localABIRequest(invocationID string, body []byte) abi.Request {
-	return abi.Request{
-		SpecVersion: abi.Version, InvocationID: invocationID, Method: "POST", Path: "/invoke",
-		Query: abi.Query{}, Headers: abi.RequestHeaders{}, Body: bytes.Clone(body),
-		DeadlineUnixMS: time.Now().Add(2 * time.Second).UnixMilli(),
-		Trigger:        abi.Trigger{Type: "http", ID: "trigger-a", ResourceRevision: 4},
-	}
 }
 
 func buildLocalStandardGoFixture(t *testing.T) []byte {
