@@ -142,6 +142,48 @@ type Assignment struct {
 	PolicyDigest         digest.SHA256
 }
 
+// Validate checks the immutable placement result before a control plane
+// persists it as Assignment intent.
+func (a Assignment) Validate() error {
+	if !identifierPattern.MatchString(a.CommandID) {
+		return problem.Invalid("command_id", "must be a valid identifier")
+	}
+	identity := servingauth.AssignmentIdentity{
+		Worker:               a.Worker,
+		AssignmentID:         a.AssignmentID,
+		VersionID:            a.VersionID,
+		AdmissionEpoch:       a.AdmissionEpoch,
+		DeploymentGeneration: a.DeploymentGeneration,
+		PolicyDigest:         a.PolicyDigest,
+		Mode:                 servingauth.ModeNormal,
+	}
+	if err := identity.Validate(); err != nil {
+		return err
+	}
+	if _, err := digest.ParseSHA256(a.ArtifactDigest.String()); err != nil {
+		return problem.Invalid("artifact_digest", "must be a lowercase sha-256 digest")
+	}
+	if a.ArtifactSize < 1 || a.ArtifactSize > model.MaxArtifactBytes {
+		return problem.Invalid("artifact_size", "must be within the v1 artifact size limit")
+	}
+	if a.ABI != model.ABIWASICommandV1 {
+		return problem.Invalid("abi", "is not supported")
+	}
+	if a.HostAPI != model.HostAPIProfileNone {
+		return problem.Invalid("host_api", "is not supported")
+	}
+	if a.FeatureProfile != wasmprofile.FeatureProfile {
+		return problem.Invalid("feature_profile", "is not supported")
+	}
+	if _, err := wasmprofile.New(wasmprofile.EngineCompiler, a.MemoryMiB); err != nil {
+		return problem.Invalid("memory_mib", "is not a supported runtime memory tier")
+	}
+	if a.RequiredSlots == 0 || a.RequiredSlots > MaxWorkerSlots {
+		return problem.Invalid("required_slots", "must be within the v1 worker slot limit")
+	}
+	return nil
+}
+
 // DecisionStatus describes how a Plan call was satisfied.
 type DecisionStatus string
 

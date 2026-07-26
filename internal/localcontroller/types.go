@@ -4,6 +4,7 @@ import (
 	"github.com/yourikka/minicloud/internal/controlplane"
 	"github.com/yourikka/minicloud/internal/digest"
 	"github.com/yourikka/minicloud/internal/model"
+	"github.com/yourikka/minicloud/internal/scheduler"
 )
 
 // CreateFunctionInput contains the caller-controlled Function fields. The
@@ -52,4 +53,18 @@ type PublishRouteInput struct {
 	FunctionID                  string
 	VersionID                   string
 	ExpectedActiveRouteRevision uint64
+}
+
+// CommitAssignmentInput persists one Planner result against an exact
+// Deployment scaling revision before any Worker preparation is attempted.
+type CommitAssignmentInput struct {
+	FunctionID              string
+	Placement               scheduler.Assignment
+	ExpectedScalingRevision uint64
+}
+
+// CancelAssignmentInput withdraws one Assignment with a resource-revision CAS.
+type CancelAssignmentInput struct {
+	AssignmentID             string
+	ExpectedResourceRevision uint64
 }

@@ -86,9 +86,10 @@ type Controller struct {
 	ids       IDSource
 	salts     SaltSource
 
-	catalog  *controlplane.Catalog
-	releases *controlplane.ReleaseStore
-	routes   *controlplane.RouteStore
+	catalog     *controlplane.Catalog
+	releases    *controlplane.ReleaseStore
+	routes      *controlplane.RouteStore
+	assignments *controlplane.AssignmentStore
 
 	validationMu sync.Mutex
 	validating   map[string]struct{}
@@ -117,16 +118,22 @@ func New(config Config) (*Controller, error) {
 
 	catalog := controlplane.NewCatalog()
 	releases := controlplane.NewReleaseStore(catalog)
+	routes := controlplane.NewRouteStore(catalog, releases)
+	assignments, err := controlplane.NewAssignmentStore(routes)
+	if err != nil {
+		return nil, fmt.Errorf("creating local assignment store: %w", err)
+	}
 	return &Controller{
-		artifacts:  config.Artifacts,
-		validator:  config.Validator,
-		commands:   config.Commands,
-		ids:        config.IDs,
-		salts:      config.Salts,
-		catalog:    catalog,
-		releases:   releases,
-		routes:     controlplane.NewRouteStore(catalog, releases),
-		validating: make(map[string]struct{}),
+		artifacts:   config.Artifacts,
+		validator:   config.Validator,
+		commands:    config.Commands,
+		ids:         config.IDs,
+		salts:       config.Salts,
+		catalog:     catalog,
+		releases:    releases,
+		routes:      routes,
+		assignments: assignments,
+		validating:  make(map[string]struct{}),
 	}, nil
 }
 

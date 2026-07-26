@@ -17,6 +17,8 @@ import (
 	"github.com/yourikka/minicloud/internal/digest"
 	"github.com/yourikka/minicloud/internal/model"
 	"github.com/yourikka/minicloud/internal/problem"
+	"github.com/yourikka/minicloud/internal/scheduler"
+	"github.com/yourikka/minicloud/internal/servingauth"
 	"github.com/yourikka/minicloud/internal/validator"
 	validatorprotocol "github.com/yourikka/minicloud/internal/validator/protocol"
 )
@@ -141,6 +143,69 @@ func TestControllerPublishesReadyVersionAsSingleTargetRoute(t *testing.T) {
 	if len(states) != 1 || states[0].Route == nil || states[0].Version == nil || states[0].Deployment == nil ||
 		states[0].Route.Targets[0].VersionID != admission.Version.VersionID {
 		t.Fatalf("ListServingStates() = %+v, want ready serving state", states)
+	}
+}
+
+func TestControllerCommitsAndCancelsAssignmentIntent(t *testing.T) {
+	t.Parallel()
+	controller, _ := newControllerHarness(t, []validatorStep{{report: acceptedReport}})
+	artifactBytes := []byte{0x20, 0x21, 0x22}
+	artifactDigest := digest.Sum(artifactBytes)
+	if _, err := controller.PutArtifact(t.Context(), artifactDigest, bytes.NewReader(artifactBytes)); err != nil {
+		t.Fatalf("PutArtifact() error = %v", err)
+	}
+	function := createTestFunction(t, controller, "assignment")
+	admission, err := controller.CreateVersion(t.Context(), testVersionInput(function.ID, artifactDigest))
+	if err != nil {
+		t.Fatalf("CreateVersion() error = %v", err)
+	}
+	route, _, err := controller.PublishRoute(t.Context(), PublishRouteInput{
+		FunctionID: function.ID, VersionID: admission.Version.VersionID,
+		ExpectedActiveRouteRevision: 0,
+	})
+	if err != nil {
+		t.Fatalf("PublishRoute() error = %v", err)
+	}
+	placement := scheduler.Assignment{
+		CommandID: "placement-command-01", AssignmentID: "assignment-01",
+		Worker:    servingauth.WorkerSession{WorkerID: "worker-01", BootID: "boot-01", SessionEpoch: 1},
+		VersionID: admission.Version.VersionID, ArtifactDigest: admission.Version.ArtifactDigest,
+		ArtifactSize: admission.Version.ArtifactSize, ABI: admission.Version.ABI,
+		HostAPI: admission.Version.HostAPIProfile, FeatureProfile: admission.Version.RuntimeFeatureProfile,
+		MemoryMiB: admission.Deployment.ResourceLimits.MemoryMiB, RequiredSlots: 1,
+		AdmissionEpoch:       admission.Version.AdmissionEpoch,
+		DeploymentGeneration: admission.Deployment.Generation,
+		PolicyDigest:         admission.Deployment.EffectivePolicyDigest,
+	}
+	committed, err := controller.CommitAssignment(t.Context(), CommitAssignmentInput{
+		FunctionID: function.ID, Placement: placement,
+		ExpectedScalingRevision: admission.Deployment.ScalingRevision,
+	})
+	if err != nil {
+		t.Fatalf("CommitAssignment() error = %v", err)
+	}
+	if committed.CreatedRaftIndex <= route.CreatedRaftIndex || committed.DesiredState != controlplane.AssignmentAssigned ||
+		committed.Identity().AssignmentID != placement.AssignmentID {
+		t.Fatalf("CommitAssignment() = %+v", committed)
+	}
+	stored, err := controller.GetAssignment(t.Context(), placement.AssignmentID)
+	if err != nil || stored != committed {
+		t.Fatalf("GetAssignment() = %+v, %v", stored, err)
+	}
+	cancelled, err := controller.CancelAssignment(t.Context(), CancelAssignmentInput{
+		AssignmentID: placement.AssignmentID, ExpectedResourceRevision: committed.ResourceRevision,
+	})
+	if err != nil {
+		t.Fatalf("CancelAssignment() error = %v", err)
+	}
+	if cancelled.DesiredState != controlplane.AssignmentCancelled ||
+		cancelled.ResourceRevision != committed.ResourceRevision+1 ||
+		cancelled.LastAppliedIndex <= committed.LastAppliedIndex {
+		t.Fatalf("CancelAssignment() = %+v", cancelled)
+	}
+	listed, err := controller.ListAssignments(t.Context())
+	if err != nil || len(listed) != 1 || listed[0] != cancelled {
+		t.Fatalf("ListAssignments() = %+v, %v", listed, err)
 	}
 }
 
