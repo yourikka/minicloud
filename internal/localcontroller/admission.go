@@ -29,28 +29,54 @@ func (c *Controller) CreateVersion(ctx context.Context, input CreateVersionInput
 	if c == nil || c.releases == nil {
 		return AdmissionResult{}, errors.New("creating version: local controller release store is required")
 	}
+	prepared, err := c.prepareCreateVersion(ctx, input)
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	created, err := c.applyCreateVersion(prepared)
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	return c.driveAdmission(ctx, created, prepared)
+}
+
+// preparedVersion holds one immutable Version and every command metadata value
+// its creation and validation fence need. Reserving both commands before the
+// state change keeps an Uploaded Version from existing without a startable
+// validation fence.
+type preparedVersion struct {
+	createCommand CommandMeta
+	startCommand  CommandMeta
+	validationID  string
+	version       model.Version
+}
+
+func (c *Controller) prepareCreateVersion(
+	ctx context.Context,
+	input CreateVersionInput,
+) (preparedVersion, error) {
 	if input.ResourceRequest.Timeout%time.Millisecond != 0 {
-		return AdmissionResult{}, problem.Invalid("resource_request.timeout", "must use whole milliseconds")
+		return preparedVersion{}, problem.Invalid("resource_request.timeout", "must use whole milliseconds")
 	}
 	artifactInfo, err := c.verifyArtifact(ctx, input.ArtifactDigest)
 	if err != nil {
-		return AdmissionResult{}, err
+		return preparedVersion{}, err
 	}
 	versionID, err := c.newID("version")
 	if err != nil {
-		return AdmissionResult{}, err
+		return preparedVersion{}, err
 	}
 	validationID, err := c.newID("validation")
 	if err != nil {
-		return AdmissionResult{}, err
+		return preparedVersion{}, err
 	}
 	createCommand, err := c.nextCommand()
 	if err != nil {
-		return AdmissionResult{}, err
+		return preparedVersion{}, err
 	}
 	startCommand, err := c.nextCommand()
 	if err != nil {
-		return AdmissionResult{}, err
+		return preparedVersion{}, err
 	}
 	version := model.Version{
 		Metadata: model.Metadata{
@@ -75,14 +101,34 @@ func (c *Controller) CreateVersion(ctx context.Context, input CreateVersionInput
 		RequestedCapabilities: cloneCapabilities(input.RequestedCapabilities),
 		State:                 model.VersionUploaded,
 	}
+	return preparedVersion{
+		createCommand: createCommand,
+		startCommand:  startCommand,
+		validationID:  validationID,
+		version:       version,
+	}, nil
+}
+
+func (c *Controller) applyCreateVersion(prepared preparedVersion) (model.Version, error) {
 	created, err := c.releases.CreateVersion(controlplane.CreateVersionCommand{
 		IfNoneMatch:  true,
-		AppliedIndex: createCommand.AppliedIndex,
-		Version:      version,
+		AppliedIndex: prepared.createCommand.AppliedIndex,
+		Version:      prepared.version,
 	})
 	if err != nil {
-		return AdmissionResult{}, fmt.Errorf("creating version: %w", err)
+		return model.Version{}, fmt.Errorf("creating version: %w", err)
 	}
+	return created, nil
+}
+
+// driveAdmission starts the persisted validation fence of an already created
+// Version and runs its first admission attempt. A validator infrastructure
+// failure leaves the fence intact for ResumePendingValidation.
+func (c *Controller) driveAdmission(
+	ctx context.Context,
+	created model.Version,
+	prepared preparedVersion,
+) (AdmissionResult, error) {
 	result := AdmissionResult{Version: created}
 	if !c.claimValidation(created.VersionID) {
 		return result, errors.New("creating version: validation is already active")
@@ -92,14 +138,14 @@ func (c *Controller) CreateVersion(ctx context.Context, input CreateVersionInput
 	started, err := c.releases.StartValidation(controlplane.StartValidationCommand{
 		VersionID:                created.VersionID,
 		ExpectedResourceRevision: created.ResourceRevision,
-		ValidationID:             validationID,
-		UpdatedAt:                startCommand.At,
-		AppliedIndex:             startCommand.AppliedIndex,
+		ValidationID:             prepared.validationID,
+		UpdatedAt:                prepared.startCommand.At,
+		AppliedIndex:             prepared.startCommand.AppliedIndex,
 	})
 	if err != nil {
 		return result, fmt.Errorf("starting version validation: %w", err)
 	}
-	return c.admit(ctx, started, validationID)
+	return c.admit(ctx, started, prepared.validationID)
 }
 
 // GetVersion returns one Version and the Deployment created with a successful

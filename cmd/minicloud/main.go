@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,6 +80,31 @@ func parseConfig(
 	)
 	tlsCertificate := flags.String("tls-cert", environment(getenv, "MINICLOUD_TLS_CERT", ""), "TLS certificate chain")
 	tlsPrivateKey := flags.String("tls-key", environment(getenv, "MINICLOUD_TLS_KEY", ""), "TLS private key")
+	managementAddress := flags.String(
+		"management-listen",
+		environment(getenv, "MINICLOUD_MANAGEMENT_LISTEN", ""),
+		"management HTTP listen address (management stays disabled without a token)",
+	)
+	managementTokenFile := flags.String(
+		"management-token-file",
+		environment(getenv, "MINICLOUD_MANAGEMENT_TOKEN_FILE", ""),
+		"file containing the static management token",
+	)
+	managementSubject := flags.String(
+		"management-subject",
+		environment(getenv, "MINICLOUD_MANAGEMENT_SUBJECT", ""),
+		"stable management principal recorded by operations",
+	)
+	managementTLSCertificate := flags.String(
+		"management-tls-cert",
+		environment(getenv, "MINICLOUD_MANAGEMENT_TLS_CERT", ""),
+		"management TLS certificate chain",
+	)
+	managementTLSPrivateKey := flags.String(
+		"management-tls-key",
+		environment(getenv, "MINICLOUD_MANAGEMENT_TLS_KEY", ""),
+		"management TLS private key",
+	)
 	flags.DurationVar(&syncInterval, "sync-interval", syncInterval, "local convergence interval")
 	if err := flags.Parse(args); err != nil {
 		return localcore.Config{}, err
@@ -90,6 +116,17 @@ func parseConfig(
 	if *tlsCertificate != "" || *tlsPrivateKey != "" {
 		tlsFiles = &gatewayhttp.TLSFiles{Certificate: *tlsCertificate, PrivateKey: *tlsPrivateKey}
 	}
+	management, err := managementConfig(
+		getenv,
+		*managementAddress,
+		*managementTokenFile,
+		*managementSubject,
+		*managementTLSCertificate,
+		*managementTLSPrivateKey,
+	)
+	if err != nil {
+		return localcore.Config{}, err
+	}
 	return localcore.Config{
 		DataRoot:         *dataRoot,
 		ValidatorCommand: *validatorCommand,
@@ -98,6 +135,53 @@ func parseConfig(
 			Address: *address,
 			TLS:     tlsFiles,
 		},
+		Management: management,
+	}, nil
+}
+
+// managementConfig assembles the optional management boundary. The token comes
+// from MINICLOUD_MANAGEMENT_TOKEN or a token file, never from a CLI argument,
+// so it cannot leak through the process argument list.
+func managementConfig(
+	getenv func(string) string,
+	address string,
+	tokenFile string,
+	subject string,
+	tlsCertificate string,
+	tlsPrivateKey string,
+) (localcore.ManagementConfig, error) {
+	token := getenv("MINICLOUD_MANAGEMENT_TOKEN")
+	if tokenFile != "" {
+		if token != "" {
+			return localcore.ManagementConfig{}, errors.New(
+				"MINICLOUD_MANAGEMENT_TOKEN and -management-token-file are mutually exclusive",
+			)
+		}
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return localcore.ManagementConfig{}, fmt.Errorf("reading management token file: %w", err)
+		}
+		token = strings.TrimSpace(string(data))
+	}
+	if token == "" {
+		if address != "" || subject != "" {
+			return localcore.ManagementConfig{}, errors.New(
+				"management listen address requires MINICLOUD_MANAGEMENT_TOKEN or -management-token-file",
+			)
+		}
+		return localcore.ManagementConfig{}, nil
+	}
+	var tlsFiles *gatewayhttp.TLSFiles
+	if tlsCertificate != "" || tlsPrivateKey != "" {
+		tlsFiles = &gatewayhttp.TLSFiles{Certificate: tlsCertificate, PrivateKey: tlsPrivateKey}
+	}
+	return localcore.ManagementConfig{
+		HTTP: gatewayhttp.ServerConfig{
+			Address: address,
+			TLS:     tlsFiles,
+		},
+		Token:   token,
+		Subject: subject,
 	}, nil
 }
 

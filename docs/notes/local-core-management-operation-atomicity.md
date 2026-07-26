@@ -1,6 +1,7 @@
 # Local Core Management Operation Atomicity
 
-- Status: open design constraint
+- Status: resolved by the terminal-command boundary; see
+  `management-operation-terminal-boundary.md` and ADR 0020
 - Date: 2026-07-25
 
 ## Problem

@@ -35,6 +35,45 @@ func TestParseConfigFlagsOverrideEnvironment(t *testing.T) {
 	}
 }
 
+func TestParseConfigAssemblesOptionalManagementBoundary(t *testing.T) {
+	t.Parallel()
+	environment := map[string]string{
+		"MINICLOUD_MANAGEMENT_TOKEN": "0123456789abcdef0123456789abcdef",
+	}
+	config, err := parseConfig([]string{
+		"-management-listen", "127.0.0.1:9200",
+		"-management-subject", "operator",
+	}, func(name string) string { return environment[name] }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if !config.Management.Enabled() || config.Management.HTTP.Address != "127.0.0.1:9200" ||
+		config.Management.Subject != "operator" ||
+		config.Management.Token != environment["MINICLOUD_MANAGEMENT_TOKEN"] {
+		t.Fatalf("parseConfig() management = %+v", config.Management)
+	}
+
+	disabled, err := parseConfig(nil, func(string) string { return "" }, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if disabled.Management.Enabled() {
+		t.Fatalf("parseConfig() management = %+v, want disabled without a token", disabled.Management)
+	}
+}
+
+func TestParseConfigRejectsManagementListenWithoutToken(t *testing.T) {
+	t.Parallel()
+	_, err := parseConfig(
+		[]string{"-management-listen", "127.0.0.1:9200"},
+		func(string) string { return "" },
+		&bytes.Buffer{},
+	)
+	if err == nil {
+		t.Fatal("parseConfig() accepted a management listener without a token")
+	}
+}
+
 func TestParseConfigRejectsInvalidEnvironmentAndArguments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

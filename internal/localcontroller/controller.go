@@ -100,6 +100,9 @@ type Controller struct {
 	releases    *controlplane.ReleaseStore
 	routes      *controlplane.RouteStore
 	assignments *controlplane.AssignmentStore
+	ledger      *controlplane.Ledger
+
+	operationMu sync.RWMutex
 
 	validationMu sync.Mutex
 	validating   map[string]struct{}
@@ -147,6 +150,7 @@ func New(config Config) (*Controller, error) {
 		releases:    releases,
 		routes:      routes,
 		assignments: assignments,
+		ledger:      controlplane.New(),
 		validating:  make(map[string]struct{}),
 	}, nil
 }

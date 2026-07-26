@@ -44,21 +44,36 @@ func (c *Controller) CreateFunction(ctx context.Context, input CreateFunctionInp
 	if c == nil || c.catalog == nil {
 		return FunctionView{}, fmt.Errorf("creating function: local controller catalog is required")
 	}
-	invocationToken, verifier, err := c.newInvocationToken(input.AuthPolicy)
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	prepared, err := c.prepareCreateFunction(input)
 	if err != nil {
 		return FunctionView{}, err
+	}
+	return c.applyCreateFunction(prepared)
+}
+
+type preparedFunction struct {
+	command CommandMeta
+	view    FunctionView
+}
+
+func (c *Controller) prepareCreateFunction(input CreateFunctionInput) (preparedFunction, error) {
+	invocationToken, verifier, err := c.newInvocationToken(input.AuthPolicy)
+	if err != nil {
+		return preparedFunction{}, err
 	}
 	functionID, err := c.newID("function")
 	if err != nil {
-		return FunctionView{}, err
+		return preparedFunction{}, err
 	}
 	triggerID, err := c.newID("trigger")
 	if err != nil {
-		return FunctionView{}, err
+		return preparedFunction{}, err
 	}
 	command, err := c.nextCommand()
 	if err != nil {
-		return FunctionView{}, err
+		return preparedFunction{}, err
 	}
 
 	function := model.Function{
@@ -88,21 +103,24 @@ func (c *Controller) CreateFunction(ctx context.Context, input CreateFunctionInp
 		AuthPolicy:          input.AuthPolicy,
 		TokenVerifierDigest: verifier,
 	}
+	return preparedFunction{
+		command: command,
+		view: FunctionView{
+			Function: function, Trigger: trigger, InvocationToken: invocationToken,
+		},
+	}, nil
+}
+
+func (c *Controller) applyCreateFunction(prepared preparedFunction) (FunctionView, error) {
 	if _, err := c.catalog.CreateFunction(controlplane.CreateFunctionCommand{
 		IfNoneMatch:  true,
-		AppliedIndex: command.AppliedIndex,
-		Function:     function,
-		Trigger:      trigger,
+		AppliedIndex: prepared.command.AppliedIndex,
+		Function:     prepared.view.Function,
+		Trigger:      prepared.view.Trigger,
 	}); err != nil {
 		return FunctionView{}, fmt.Errorf("creating function: %w", err)
 	}
-	function, trigger, err = c.catalog.GetFunction(functionID)
-	if err != nil {
-		return FunctionView{}, fmt.Errorf("loading created function: %w", err)
-	}
-	return FunctionView{
-		Function: function, Trigger: trigger, InvocationToken: invocationToken,
-	}, nil
+	return cloneFunctionView(prepared.view), nil
 }
 
 // RotateInvocationToken replaces the single verifier and returns plaintext
@@ -117,32 +135,68 @@ func (c *Controller) RotateInvocationToken(
 	if c == nil || c.catalog == nil || c.tokens == nil {
 		return FunctionView{}, fmt.Errorf("rotating invocation token: local controller dependencies are required")
 	}
-	token, err := c.tokens.NewToken()
-	if err != nil {
-		return FunctionView{}, fmt.Errorf("generating invocation token: %w", err)
-	}
-	if token == "" {
-		return FunctionView{}, errors.New("generating invocation token: token source returned an empty token")
-	}
-	command, err := c.nextCommand()
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	prepared, err := c.prepareRotateInvocationToken(input)
 	if err != nil {
 		return FunctionView{}, err
 	}
+	return c.applyRotateInvocationToken(prepared)
+}
+
+// preparedRotation holds one reserved Invocation Token plaintext, its verifier,
+// and the Trigger identity the rotation CAS will advance.
+type preparedRotation struct {
+	command   CommandMeta
+	input     RotateInvocationTokenInput
+	triggerID string
+	token     string
+	verifier  digest.SHA256
+}
+
+func (c *Controller) prepareRotateInvocationToken(
+	input RotateInvocationTokenInput,
+) (preparedRotation, error) {
+	_, trigger, err := c.catalog.GetFunction(input.FunctionID)
+	if err != nil {
+		return preparedRotation{}, fmt.Errorf("loading invocation token trigger: %w", err)
+	}
+	token, err := c.tokens.NewToken()
+	if err != nil {
+		return preparedRotation{}, fmt.Errorf("generating invocation token: %w", err)
+	}
+	if token == "" {
+		return preparedRotation{}, errors.New("generating invocation token: token source returned an empty token")
+	}
+	command, err := c.nextCommand()
+	if err != nil {
+		return preparedRotation{}, err
+	}
+	return preparedRotation{
+		command:   command,
+		input:     input,
+		triggerID: trigger.ID,
+		token:     token,
+		verifier:  digest.Sum([]byte(token)),
+	}, nil
+}
+
+func (c *Controller) applyRotateInvocationToken(prepared preparedRotation) (FunctionView, error) {
 	trigger, err := c.catalog.RotateInvocationToken(controlplane.RotateInvocationTokenCommand{
-		FunctionID:               input.FunctionID,
-		ExpectedResourceRevision: input.ExpectedResourceRevision,
-		TokenVerifierDigest:      digest.Sum([]byte(token)),
-		UpdatedAt:                command.At,
-		AppliedIndex:             command.AppliedIndex,
+		FunctionID:               prepared.input.FunctionID,
+		ExpectedResourceRevision: prepared.input.ExpectedResourceRevision,
+		TokenVerifierDigest:      prepared.verifier,
+		UpdatedAt:                prepared.command.At,
+		AppliedIndex:             prepared.command.AppliedIndex,
 	})
 	if err != nil {
 		return FunctionView{}, fmt.Errorf("rotating invocation token: %w", err)
 	}
-	function, _, err := c.catalog.GetFunction(input.FunctionID)
+	function, _, err := c.catalog.GetFunction(prepared.input.FunctionID)
 	if err != nil {
 		return FunctionView{}, fmt.Errorf("loading rotated invocation token: %w", err)
 	}
-	return FunctionView{Function: function, Trigger: trigger, InvocationToken: token}, nil
+	return FunctionView{Function: function, Trigger: trigger, InvocationToken: prepared.token}, nil
 }
 
 // GetFunction returns one Function and its default HTTP Trigger.
@@ -153,6 +207,8 @@ func (c *Controller) GetFunction(ctx context.Context, functionID string) (Functi
 	if c == nil || c.catalog == nil {
 		return FunctionView{}, fmt.Errorf("getting function: local controller catalog is required")
 	}
+	c.operationMu.RLock()
+	defer c.operationMu.RUnlock()
 	function, trigger, err := c.catalog.GetFunction(functionID)
 	if err != nil {
 		return FunctionView{}, fmt.Errorf("getting function: %w", err)
@@ -168,6 +224,8 @@ func (c *Controller) ListFunctions(ctx context.Context) ([]FunctionView, error) 
 	if c == nil || c.catalog == nil {
 		return nil, fmt.Errorf("listing functions: local controller catalog is required")
 	}
+	c.operationMu.RLock()
+	defer c.operationMu.RUnlock()
 	snapshot := c.catalog.Snapshot()
 	triggers := make(map[string]controlplane.HTTPTrigger, len(snapshot.Triggers))
 	for _, trigger := range snapshot.Triggers {
@@ -195,6 +253,8 @@ func (c *Controller) SetFunctionLifecycle(
 	if c == nil || c.catalog == nil {
 		return model.Function{}, fmt.Errorf("setting function lifecycle: local controller catalog is required")
 	}
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
 	command, err := c.nextCommand()
 	if err != nil {
 		return model.Function{}, err
@@ -221,6 +281,15 @@ func cloneLabels(labels map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func cloneFunctionView(view FunctionView) FunctionView {
+	view.Function.Labels = cloneLabels(view.Function.Labels)
+	if view.Trigger.TokenVerifierDigest != nil {
+		verifier := *view.Trigger.TokenVerifierDigest
+		view.Trigger.TokenVerifierDigest = &verifier
+	}
+	return view
 }
 
 func (c *Controller) newInvocationToken(

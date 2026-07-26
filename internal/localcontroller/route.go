@@ -24,8 +24,24 @@ func (c *Controller) PublishRoute(
 	if c == nil || c.routes == nil || c.releases == nil {
 		return model.Route{}, model.Function{}, errors.New("publishing route: local controller route dependencies are required")
 	}
+	prepared, err := c.preparePublishRoute(input)
+	if err != nil {
+		return model.Route{}, model.Function{}, err
+	}
+	return c.applyPublishRoute(prepared)
+}
+
+// preparedRoute is one complete immutable Route snapshot and the exact CAS its
+// publication applies. Every fallible identifier and salt is already reserved.
+type preparedRoute struct {
+	command CommandMeta
+	input   PublishRouteInput
+	route   model.Route
+}
+
+func (c *Controller) preparePublishRoute(input PublishRouteInput) (preparedRoute, error) {
 	if input.ExpectedActiveRouteRevision == math.MaxUint64 {
-		return model.Route{}, model.Function{}, &problem.Error{
+		return preparedRoute{}, &problem.Error{
 			Code:    problem.CodeConflict,
 			Message: "function route revision space is exhausted",
 		}
@@ -33,11 +49,11 @@ func (c *Controller) PublishRoute(
 
 	version, deployment, err := c.releases.Get(input.VersionID)
 	if err != nil {
-		return model.Route{}, model.Function{}, fmt.Errorf("loading route target version: %w", err)
+		return preparedRoute{}, fmt.Errorf("loading route target version: %w", err)
 	}
 	if version.FunctionID != input.FunctionID || version.State != model.VersionReady || deployment == nil ||
 		deployment.DesiredPhase != model.DeploymentActive {
-		return model.Route{}, model.Function{}, &problem.Error{
+		return preparedRoute{}, &problem.Error{
 			Code:    problem.CodeConflict,
 			Message: "route target is not a ready active version for this function",
 		}
@@ -45,19 +61,19 @@ func (c *Controller) PublishRoute(
 
 	routeID, err := c.newID("route")
 	if err != nil {
-		return model.Route{}, model.Function{}, err
+		return preparedRoute{}, err
 	}
 	saltID, err := c.newID("salt")
 	if err != nil {
-		return model.Route{}, model.Function{}, err
+		return preparedRoute{}, err
 	}
 	salt, err := c.newRouteSalt()
 	if err != nil {
-		return model.Route{}, model.Function{}, err
+		return preparedRoute{}, err
 	}
 	command, err := c.nextCommand()
 	if err != nil {
-		return model.Route{}, model.Function{}, err
+		return preparedRoute{}, err
 	}
 
 	route := model.Route{
@@ -84,12 +100,16 @@ func (c *Controller) PublishRoute(
 		Salt:        salt,
 		Enabled:     true,
 	}
+	return preparedRoute{command: command, input: input, route: route}, nil
+}
+
+func (c *Controller) applyPublishRoute(prepared preparedRoute) (model.Route, model.Function, error) {
 	published, function, err := c.routes.Publish(controlplane.PublishRouteCommand{
-		FunctionID:                  input.FunctionID,
-		ExpectedActiveRouteRevision: input.ExpectedActiveRouteRevision,
-		Route:                       route,
-		UpdatedAt:                   command.At,
-		AppliedIndex:                command.AppliedIndex,
+		FunctionID:                  prepared.input.FunctionID,
+		ExpectedActiveRouteRevision: prepared.input.ExpectedActiveRouteRevision,
+		Route:                       prepared.route,
+		UpdatedAt:                   prepared.command.At,
+		AppliedIndex:                prepared.command.AppliedIndex,
 	})
 	if err != nil {
 		return model.Route{}, model.Function{}, fmt.Errorf("publishing route: %w", err)
