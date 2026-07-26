@@ -143,6 +143,9 @@ func (s *Server) Serve(listener net.Listener) error {
 	if listener == nil {
 		return errors.New("gateway HTTP listener is required")
 	}
+	if s.tls == nil && !loopbackListener(listener.Addr()) {
+		return errors.New("gateway HTTP server requires a loopback listener without TLS")
+	}
 	var err error
 	if s.tls == nil {
 		err = s.http.Serve(listener)
@@ -153,6 +156,14 @@ func (s *Server) Serve(listener net.Listener) error {
 		return nil
 	}
 	return err
+}
+
+func loopbackListener(address net.Addr) bool {
+	if address == nil || address.Network() != "tcp" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(address.String())
+	return err == nil && loopbackHost(host)
 }
 
 // Shutdown gracefully stops the server within its configured bound.

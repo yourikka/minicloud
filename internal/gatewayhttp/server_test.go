@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,3 +113,36 @@ func TestServerServesAndShutsDownCallerListener(t *testing.T) {
 		t.Fatalf("Serve() error = %v", err)
 	}
 }
+
+func TestServerRejectsCallerOwnedExternalPlainListener(t *testing.T) {
+	t.Parallel()
+	server, err := NewServer(ServerConfig{
+		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	listener := &fixedAddressListener{
+		address: &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 8080},
+	}
+	if err := server.Serve(listener); err == nil || !strings.Contains(err.Error(), "loopback listener") {
+		t.Fatalf("Serve() error = %v, want loopback listener error", err)
+	}
+	if listener.accepted {
+		t.Fatal("Serve() accepted connections before validating listener exposure")
+	}
+}
+
+type fixedAddressListener struct {
+	address  net.Addr
+	accepted bool
+}
+
+func (l *fixedAddressListener) Accept() (net.Conn, error) {
+	l.accepted = true
+	return nil, errors.New("unexpected accept")
+}
+
+func (*fixedAddressListener) Close() error { return nil }
+
+func (l *fixedAddressListener) Addr() net.Addr { return l.address }
